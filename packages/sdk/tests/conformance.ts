@@ -33,6 +33,13 @@ const serveConfExt = async (bus: Bus): Promise<Extension> => {
         description: 'echo content',
         execute: async args => ({ content: `echo:${String(args?.msg ?? '')}` }),
       },
+      slow: {
+        description: 'sleeps before answering (request-timeout regression)',
+        execute: async () => {
+          await sleep(2500)
+          return { content: 'woke' }
+        },
+      },
       add: {
         description: 'structured data result',
         execute: async args => ({
@@ -180,6 +187,16 @@ export function runConformance(name: string, newPair: Factory): void {
           }),
         ]),
       ).rejects.toThrow()
+      await ext.close()
+      await cleanup()
+    })
+
+    it('slow tool: no transport-level request cap when timeoutMs=0', async () => {
+      const { agentBus, extensionBus, cleanup } = await newPair()
+      const ext = await serveConfExt(extensionBus)
+      const a = new Agent(agentBus)
+      const tr = await a.callTool('sess-1', 'conf-ext', 'slow', 'slow-1', {})
+      expect(tr.content).toBe('woke')
       await ext.close()
       await cleanup()
     })

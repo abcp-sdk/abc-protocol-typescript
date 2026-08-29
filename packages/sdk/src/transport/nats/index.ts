@@ -61,9 +61,11 @@ export class NatsBus implements Bus {
   ): Promise<Envelope> {
     const body: Record<string, unknown> = { v: 1, ch, kind: 'req', payload }
     if (opts.sessionName !== undefined) body.session_name = opts.sessionName
-    const m = await this.nc.request(ch, encode(body), {
-      timeout: opts.timeoutMs ?? 2000,
-    })
+    // timeoutMs > 0 bounds the request; 0/unset means "application bounds
+    // it" — the ceiling here only guards a stuck request (nats.js would
+    // otherwise apply its own short default).
+    const t = opts.timeoutMs && opts.timeoutMs > 0 ? opts.timeoutMs : 600_000
+    const m = await this.nc.request(ch, encode(body), { timeout: t })
     const env = decode(m)
     if (env === null) throw new Error(`invalid envelope from ${ch}`)
     return env
