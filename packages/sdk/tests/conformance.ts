@@ -203,7 +203,10 @@ export function runConformance(name: string, newPair: Factory): void {
       const ext = await serveConfExt(extensionBus)
       const a = new Agent(agentBus)
       const call = (session: string, callId: string) =>
-        a.callTool(session, 'conf-ext', 'hang', callId, {}).then(tr => tr, () => undefined)
+        a.callTool(session, 'conf-ext', 'hang', callId, {}).then(
+          tr => tr,
+          () => undefined,
+        )
       const mine = call('sess-int', 'hang-1')
       const other = call('sess-other', 'hang-2')
       await sleep(500)
@@ -223,7 +226,8 @@ export function runConformance(name: string, newPair: Factory): void {
         other.then(() => true),
         sleep(700).then(() => false),
       ])
-      if (otherDone) throw new Error('session-scoped interrupt leaked to other session')
+      if (otherDone)
+        throw new Error('session-scoped interrupt leaked to other session')
 
       // broadcast interrupt reaches the remaining session
       await a.interrupt('conf-ext')
