@@ -46,53 +46,75 @@ function dlqSubjectFor(subject: string): string {
   return DLQ_PREFIX + token
 }
 
-async function ensureStreams(nc: NatsConnection): Promise<void> {
+export interface NatsConnectOptions {
+  /** Stream retention ceiling; 0 = default (24h). */
+  maxAgeMs?: number
+  /** JetStream replica count at stream creation; 0 = server default (1).
+   * Cannot change after creation. */
+  replicas?: number
+}
+
+function sameSubjects(a: string[] | undefined, b: string[]): boolean {
+  if (a === undefined) return false
+  if (a.length !== b.length) return false
+  const set = new Set(a)
+  return b.every(s => set.has(s))
+}
+
+async function ensureStreams(
+  nc: NatsConnection,
+  opts: NatsConnectOptions = {},
+): Promise<void> {
   const jsm = await jetstreamManager(nc)
-  for (const s of [
+  const maxAge = opts.maxAgeMs ?? 24 * 3600 * 1_000_000_000
+  const specs = [
     { name: STREAM_MAILBOX, subjects: ['abc.mailbox.>'] },
     { name: STREAM_EVENTS, subjects: ['abc.session.events.>'] },
     { name: STREAM_DLQ, subjects: ['abc.dlq.>'] },
-  ]) {
+  ]
+  // Create in order; when the events stream overlaps a legacy mailbox
+  // stream (pre-.2), narrow the drifted stream first and retry.
+  for (const s of specs) {
+    let info: Awaited<ReturnType<typeof jsm.streams.info>> | undefined
     try {
-      await jsm.streams.info(s.name)
+      info = await jsm.streams.info(s.name)
     } catch {
       try {
         await jsm.streams.add({
           name: s.name,
           subjects: s.subjects,
-          max_age: 24 * 3600 * 1_000_000_000,
+          max_age: maxAge,
+          ...(opts.replicas ? { num_replicas: opts.replicas } : {}),
         })
+        continue
       } catch (err) {
-        // SELF-MIGRATION (0.1 -> 0.2): a pre-0.2 ABC_MAILBOX still declares
-        // abc.session.events.>, which overlaps. Narrow the legacy stream
-        // (mailbox messages preserved) and retry — the fleet must never
-        // crash on the layout migration.
         if (
           s.name === STREAM_EVENTS &&
           String(err).includes('subjects overlap')
         ) {
-          await migrateLegacyMailbox(jsm)
-          await jsm.streams.add({
-            name: s.name,
-            subjects: s.subjects,
-            max_age: 24 * 3600 * 1_000_000_000,
-          })
+          const mi = await jsm.streams.info(STREAM_MAILBOX)
+          if (mi.config.subjects?.includes('abc.session.events.>')) {
+            await jsm.streams.update(STREAM_MAILBOX, {
+              subjects: ['abc.mailbox.>'],
+            })
+            await jsm.streams.add({
+              name: s.name,
+              subjects: s.subjects,
+              max_age: maxAge,
+              ...(opts.replicas ? { num_replicas: opts.replicas } : {}),
+            })
+            continue
+          }
         }
+        throw err
       }
     }
+    // drift repair: subjects must match the desired set
+    if (!sameSubjects(info.config.subjects, s.subjects)) {
+      await jsm.streams.update(s.name, { subjects: s.subjects })
+    }
   }
-}
-
-async function migrateLegacyMailbox(
-  jsm: ReturnType<typeof jetstreamManager> extends Promise<infer R> ? R : never,
-): Promise<void> {
-  const info = await jsm.streams.info(STREAM_MAILBOX)
-  if (!info.config.subjects?.includes('abc.session.events.>')) {
-    throw new Error('overlap not caused by the legacy mailbox layout')
-  }
-  await jsm.streams.update(STREAM_MAILBOX, {
-    subjects: ['abc.mailbox.>'],
-  })
+  void jsm
 }
 
 function decode(m: { data: Uint8Array }): Envelope | null {
@@ -412,10 +434,13 @@ async function* inboxIter(
   }
 }
 
-export async function connectNatsBus(url?: string): Promise<NatsBus> {
+export async function connectNatsBus(
+  url?: string,
+  opts: NatsConnectOptions = {},
+): Promise<NatsBus> {
   const servers = url ?? process.env.NATS_URL ?? 'nats://127.0.0.1:4222'
   const nc = await connect({ servers })
-  await ensureStreams(nc)
+  await ensureStreams(nc, opts)
   return new NatsBus(nc)
 }
 

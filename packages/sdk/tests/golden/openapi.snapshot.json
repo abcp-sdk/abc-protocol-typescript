@@ -236,6 +236,12 @@
             },
             "default": []
           },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "tools": {
             "type": "array",
             "items": {

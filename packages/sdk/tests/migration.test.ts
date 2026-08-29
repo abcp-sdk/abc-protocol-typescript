@@ -6,8 +6,8 @@ import { Extension, publishSessionEvent } from '../src/extension/index.js'
 import { start as startNats } from '../src/natsrun/index.js'
 import { connectNatsBus } from '../src/transport/nats/index.js'
 
-describe('abc migration: 0.1 -> 0.2 stream layout', () => {
-  it('self-migrates a pre-0.2 layout on connect', async () => {
+describe('abc stream topology reconcile', () => {
+  it('reconciles drifted stream subjects (declarative topology)', async () => {
     const server = await startNats({ storage: 'memory' })
     try {
       const nc = await connect({ servers: server.url })
@@ -22,18 +22,13 @@ describe('abc migration: 0.1 -> 0.2 stream layout', () => {
       await nc.close()
 
       const bus = await connectNatsBus(server.url)
-      await publishSessionEvent(bus, 'sess-mig', 'mig-done')
+      await publishSessionEvent(bus, 'sess-reconcile', 'ok')
       const a = new Agent(bus)
-      const envs = await a.replayEvents('sess-mig')
-      if (envs.length === 0) {
-        throw new Error('no events replayed from the post-migration stream')
-      }
-      void Extension
+      const envs = await a.replayEvents('sess-reconcile')
+      if (envs.length === 0) throw new Error('reconcile broke event replay')
       await bus.close()
     } finally {
-      // generous teardown: the nats-runner's async error path can leave the
-      // child briefly; give the stop a moment with retries
       await server.stop()
     }
   })
-}, 30_000)
+})

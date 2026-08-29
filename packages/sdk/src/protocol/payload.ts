@@ -130,6 +130,13 @@ export const ExtensionManifestSchema = z.object({
   id: z.string(),
   version: z.string(),
   capabilities: z.array(z.enum(['tools', 'prompt'])).default([]),
+  /**
+   * Protocol features this extension implements, for graceful degradation:
+   * an agent may use this to avoid relying on a newer capability the
+   * extension does not speak (e.g. config KV recovery, presence, DLQ).
+   * Absent = the pre-0.3 baseline (req/pub/queue, tools, hooks, variables).
+   */
+  features: z.array(z.string()).optional(),
   tools: z.array(ExtensionToolSchema).optional(),
   prompt: z
     .object({ variables: z.array(ExtensionVariableSchema).optional() })
@@ -147,6 +154,17 @@ export const ExtensionManifestSchema = z.object({
     .optional(),
 })
 export type ExtensionManifest = z.infer<typeof ExtensionManifestSchema>
+
+/** Known protocol features (the bitmap carried by the manifest). */
+export const PROTOCOL_FEATURES = [
+  'dlq',
+  'config-kv',
+  'presence',
+  'kv-escaping',
+  'interrupt-abort',
+  'progress',
+] as const
+export type ProtocolFeature = (typeof PROTOCOL_FEATURES)[number]
 
 /** Call-hook request (sync `req`; failure aborts the enclosing operation). */
 export const HookCallSchema = z.object({

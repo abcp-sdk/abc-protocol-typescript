@@ -161,6 +161,15 @@ export class Extension {
       id: cfg.id,
       version: cfg.version,
       capabilities,
+      // the cooperative feature set this SDK build speaks
+      features: [
+        'dlq',
+        'config-kv',
+        'presence',
+        'kv-escaping',
+        'interrupt-abort',
+        'progress',
+      ],
       ...(tools.length > 0 ? { tools } : {}),
       ...(variables.length > 0 ? { prompt: { variables } } : {}),
       ...(config.length > 0 ? { config } : {}),

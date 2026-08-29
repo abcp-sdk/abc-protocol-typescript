@@ -433,6 +433,13 @@ export class Agent {
     }
   }
 
+  /** Whether a discovered extension advertises a protocol feature
+   * (absent = pre-0.3 baseline). */
+  extSupports(extId: string, feature: string): boolean {
+    const m = this.manifestCache.get(extId)
+    return m?.features?.includes(feature) ?? false
+  }
+
   async callTool(
     sessionName: string,
     extId: string,
