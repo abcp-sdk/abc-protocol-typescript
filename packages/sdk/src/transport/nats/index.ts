@@ -1,18 +1,4 @@
 import {
-  type Bus,
-  type Caps,
-  type Envelope,
-  EnvelopeSchema,
-  type InboxConsumeOpts,
-  type InboxMsg,
-  type InboxPublishOpts,
-  type InboxSubscription,
-  type RequestOpts,
-  sessionToken,
-  type SubscribeOpts,
-  type Subscription,
-} from '@abc-protocol/sdk'
-import {
   type ConsumerMessages,
   jetstream,
   jetstreamManager,
@@ -24,15 +10,18 @@ import type {
 } from '@nats-io/nats-core'
 import { Objm } from '@nats-io/obj'
 import { connect } from '@nats-io/transport-node'
-
-const CAPS: Caps = {
-  requestReply: true,
-  broadcast: true,
-  pubSub: true,
-  durableInbox: true,
-  object: true,
-  kv: true,
-}
+import type {
+  Bus,
+  Envelope,
+  InboxConsumeOpts,
+  InboxMsg,
+  InboxPublishOpts,
+  InboxSubscription,
+  RequestOpts,
+  SubscribeOpts,
+  Subscription,
+} from '../../bus/index.js'
+import { EnvelopeSchema, sessionToken } from '../../protocol/index.js'
 
 const STREAM_MAILBOX = 'ABC_MAILBOX'
 const INBOX_WILDCARD = 'abc.mailbox.>'
@@ -63,7 +52,6 @@ function encode(payload: unknown): Buffer {
 }
 
 export class NatsBus implements Bus {
-  readonly caps = CAPS
   constructor(private readonly nc: NatsConnection) {}
 
   async request(
@@ -197,7 +185,7 @@ export class NatsBus implements Bus {
     value: string,
     ttlMs: number,
   ): Promise<number | null> {
-    const kv = await new Kvm(this.nc).create(bucket, { ttl: ttlMs })
+    const kv = await this.openKv(bucket, ttlMs)
     try {
       return await kv.create(key, Buffer.from(value))
     } catch {
@@ -210,7 +198,7 @@ export class NatsBus implements Bus {
     value: string,
     ttlMs: number,
   ): Promise<void> {
-    const kv = await new Kvm(this.nc).create(bucket, { ttl: ttlMs })
+    const kv = await this.openKv(bucket, ttlMs)
     await kv.put(key, Buffer.from(value))
   }
   async kvGet(bucket: string, key: string): Promise<string | null> {
@@ -245,6 +233,59 @@ export class NatsBus implements Bus {
     } catch {
       // absent is fine
     }
+  }
+
+  /**
+   * Replay the retained queue envelopes for a channel (JetStream stream
+   * contents via an ephemeral ordered-ish consumer), oldest first.
+   */
+  /**
+   * Replay the retained queue envelopes for a channel via an ephemeral
+   * JetStream consumer (deliver_policy all), oldest first.
+   */
+  /** create-or-open: creating an existing bucket with a different config
+   * (e.g. another per-call TTL) errors, so fall back to opening it. */
+  private async openKv(
+    bucket: string,
+    ttlMs: number,
+  ): Promise<Awaited<ReturnType<Kvm['create']>>> {
+    try {
+      return await new Kvm(this.nc).create(bucket, { ttl: ttlMs })
+    } catch {
+      return new Kvm(this.nc).open(bucket)
+    }
+  }
+
+  async replay(ch: string): Promise<Envelope[]> {
+    const out: Envelope[] = []
+    const jsm = await jetstreamManager(this.nc).catch(() => null)
+    if (jsm === null) return out
+    // Ephemeral consumer (no durable name) over the mailbox stream,
+    // filtered to the exact subject, delivering the whole retained window.
+    const consumer = await jsm.consumers
+      .add('ABC_MAILBOX', {
+        filter_subjects: [ch],
+        ack_policy: 'explicit',
+        deliver_policy: 'all',
+        inactive_threshold: 60_000_000_000,
+      })
+      .catch(() => null)
+    if (consumer === null) return out
+    try {
+      const js = jetstream(this.nc)
+      const c = await js.consumers.get('ABC_MAILBOX', consumer.name)
+      // fetch() terminates after `expires` — bounded replay, no live tail.
+      const messages = await c.fetch({ expires: 1_000, max_messages: 1024 })
+      for await (const m of messages) {
+        const env = decode(m)
+        if (env !== null) out.push(env)
+        m.ack()
+      }
+    } catch {
+      // Stream missing / no retained messages — empty replay.
+    }
+    await jsm.consumers.delete('ABC_MAILBOX', consumer.name).catch(() => {})
+    return out
   }
 
   async close(): Promise<void> {

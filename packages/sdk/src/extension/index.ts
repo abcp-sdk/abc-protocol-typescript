@@ -10,7 +10,6 @@ import {
   type ExtensionVariable,
   HookCallSchema,
   HookEventSchema,
-  type InterruptSignal,
   InterruptSignalSchema,
   type LifecycleEvent,
   LifecycleEventSchema,
@@ -82,9 +81,7 @@ export interface ExtensionConfig {
    * Session lifecycle callback. On "deleted" the SDK also deletes the
    * session-scoped variables (KV) before calling this.
    */
-  onLifecycle?: (
-    ev: LifecycleEvent,
-  ) => void | Promise<void>
+  onLifecycle?: (ev: LifecycleEvent) => void | Promise<void>
   /**
    * Applied config change. Returning an error (or throwing) REJECTS the
    * change: the agent keeps the old value and the revision does not advance.
@@ -459,10 +456,7 @@ export class Extension {
     for (const [name, spec] of Object.entries(this.cfg.variables ?? {})) {
       if (spec.scope !== 'session') continue
       await this.bus
-        .kvDelete(
-          VARS_BUCKET,
-          sessionVarKey(this.cfg.id, sessionName, name),
-        )
+        .kvDelete(VARS_BUCKET, sessionVarKey(this.cfg.id, sessionName, name))
         .catch(() => {})
     }
   }
@@ -567,5 +561,10 @@ export function setSessionVariable(
   name: string,
   value: string,
 ): Promise<void> {
-  return bus.kvPut(VARS_BUCKET, sessionVarKey(extId, sessionName, name), value, 0)
+  return bus.kvPut(
+    VARS_BUCKET,
+    sessionVarKey(extId, sessionName, name),
+    value,
+    0,
+  )
 }

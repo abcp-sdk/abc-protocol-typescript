@@ -5,7 +5,7 @@
 //
 // Asserts the cross-language wire contract: any failure exits non-zero.
 import { Agent } from '@abc-protocol/sdk'
-import { connectNatsBus } from '@abc-protocol/sdk-nats'
+import { connectNatsBus } from '@abc-protocol/sdk'
 
 async function fail(msg: string): Promise<never> {
   console.error(`[ts-agent] FAIL: ${msg}`)

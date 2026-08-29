@@ -142,7 +142,9 @@ export const ExtensionManifestSchema = z.object({
    * renamed / deleted). The agent publishes lifecycle events regardless;
    * the declaration documents intent.
    */
-  lifecycle: z.array(z.enum(['created', 'forked', 'renamed', 'deleted'])).optional(),
+  lifecycle: z
+    .array(z.enum(['created', 'forked', 'renamed', 'deleted']))
+    .optional(),
 })
 export type ExtensionManifest = z.infer<typeof ExtensionManifestSchema>
 
@@ -172,14 +174,22 @@ export type HookEvent = z.infer<typeof HookEventSchema>
  * Session lifecycle notification (a `pub` on
  * `abc.session.lifecycle.<kind>`): the agent informs interested extensions
  * that a session changed. `kind` is one of created / forked / renamed /
- * deleted; renamed carries the previous name in `previous_name`. Extensions
- * declare the kinds they care about in the manifest (`lifecycle:`), and
- * session-scoped variables and config overrides are cleaned up on `deleted`.
+ * deleted. Field alignment with the legacy abep wire format:
+ *   - forked carries `parent` (the session it forked from)
+ *   - renamed carries `from` / `to` (previous and new session name)
+ * Extensions declare the kinds they care about in the manifest
+ * (`lifecycle:`); session-scoped variables and config overrides are cleaned
+ * up on `deleted`.
  */
 export const LifecycleEventSchema = z.object({
   kind: z.enum(['created', 'forked', 'renamed', 'deleted']),
   session_name: z.string(),
-  previous_name: z.string().optional(),
+  /** forked: the session this one forked from. */
+  parent: z.string().optional(),
+  /** renamed: the previous session name. */
+  from: z.string().optional(),
+  /** renamed: the new session name (== session_name). */
+  to: z.string().optional(),
   payload: z
     .unknown()
     .openapi({ description: 'Opaque kind-specific body.' })
@@ -228,5 +238,3 @@ export const HookResponseSchema = z.object({
     .optional(),
 })
 export type HookResponse = z.infer<typeof HookResponseSchema>
-
-

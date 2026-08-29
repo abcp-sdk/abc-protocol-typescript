@@ -1,4 +1,5 @@
 import type { Bus } from '../bus/index.js'
+import { sessionVarKey, VARS_BUCKET, varKey } from '../extension/index.js'
 import {
   CH,
   ConfigSetSchema,
@@ -15,7 +16,6 @@ import {
   type ObjectRef,
   ToolResultSchema,
 } from '../protocol/index.js'
-import { VARS_BUCKET, sessionVarKey, varKey } from '../extension/index.js'
 import { type AgentConnect, connectBus } from '../transport/index.js'
 
 export interface ToolResultResolved {
@@ -80,11 +80,9 @@ class ConfigAuthority {
   ) {}
 
   async start(): Promise<void> {
-    // Recover persisted values (caps.kv transports).
-    if (this.bus.caps.kv) {
-      for (const extId of this.declarations.keys()) {
-        await this.recover(extId)
-      }
+    // Recover persisted values.
+    for (const extId of this.declarations.keys()) {
+      await this.recover(extId)
     }
     // Serve snapshot requests for every declared extension.
     const sub = await this.bus.subscribe(CH.configWildcard())
@@ -108,9 +106,7 @@ class ConfigAuthority {
   /** Record declarations from a manifest; recovers persisted state once. */
   declare(manifest: ExtensionManifest): void {
     this.declarations.set(manifest.id, manifest.config ?? [])
-    if (this.bus.caps.kv) {
-      void this.recover(manifest.id)
-    }
+    void this.recover(manifest.id)
   }
 
   private async recover(extId: string): Promise<void> {
@@ -198,32 +194,32 @@ class ConfigAuthority {
     }
 
     // Persist first (crash-safe): KV mirror, when supported.
-    if (this.bus.caps.kv) {
-      await this.bus.kvPut(
-        CONFIG_KV_BUCKET,
-        kvKey(manifest.id, scope, sessionName ?? '', name),
-        JSON.stringify(value),
-        0,
-      )
-    }
+    await this.bus.kvPut(
+      CONFIG_KV_BUCKET,
+      kvKey(manifest.id, scope, sessionName ?? '', name),
+      JSON.stringify(value),
+      0,
+    )
 
     // Deliver as 1:1 req with optional ack.
     const reqOpts: import('../bus/index.js').RequestOpts = {
       timeoutMs: useAck ? 5000 : 300,
     }
     if (sessionName !== undefined) reqOpts.sessionName = sessionName
-    const reply = await this.bus.request(
-      CH.config(manifest.id),
-      {
-        name,
-        value,
-        revision,
-        scope,
-        ...(sessionName !== undefined ? { session_name: sessionName } : {}),
-        ack: useAck,
-      },
-      reqOpts,
-    ).catch(() => null)
+    const reply = await this.bus
+      .request(
+        CH.config(manifest.id),
+        {
+          name,
+          value,
+          revision,
+          scope,
+          ...(sessionName !== undefined ? { session_name: sessionName } : {}),
+          ack: useAck,
+        },
+        reqOpts,
+      )
+      .catch(() => null)
     if (!useAck) return
     if (reply === null) {
       throw {
@@ -243,14 +239,12 @@ class ConfigAuthority {
         const prev = vals?.get(name)
         if (prev !== undefined && prev[0] === revision) vals?.delete(name)
       }
-      if (this.bus.caps.kv) {
-        await this.bus
-          .kvDelete(
-            CONFIG_KV_BUCKET,
-            kvKey(manifest.id, scope, sessionName ?? '', name),
-          )
-          .catch(() => {})
-      }
+      await this.bus
+        .kvDelete(
+          CONFIG_KV_BUCKET,
+          kvKey(manifest.id, scope, sessionName ?? '', name),
+        )
+        .catch(() => {})
       throw {
         code: 'retryable',
         message:
@@ -263,15 +257,13 @@ class ConfigAuthority {
   async dropSession(manifestId: string, sessionName: string): Promise<void> {
     const vals = this.sessions.get(manifestId)?.get(sessionName)
     if (vals === undefined) return
-    if (this.bus.caps.kv) {
-      for (const name of vals.keys()) {
-        await this.bus
-          .kvDelete(
-            CONFIG_KV_BUCKET,
-            kvKey(manifestId, 'session', sessionName, name),
-          )
-          .catch(() => {})
-      }
+    for (const name of vals.keys()) {
+      await this.bus
+        .kvDelete(
+          CONFIG_KV_BUCKET,
+          kvKey(manifestId, 'session', sessionName, name),
+        )
+        .catch(() => {})
     }
     this.sessions.get(manifestId)?.delete(sessionName)
   }
@@ -318,24 +310,20 @@ void ConfigSetSchema
 export class Agent {
   /** Transport ownership handle (inproc/ws hub) when Agent.connect started it. */
   hub?: unknown
-  private closeHandle?: () => void | Promise<void>
   private configAuthority?: ConfigAuthority
   private manifestCache = new Map<string, ExtensionManifest>()
 
   constructor(private readonly bus: Bus) {}
 
-  /** Wire a transport and return a ready Agent (no manual createBus). */
+  /** Wire the NATS transport and return a ready Agent. */
   static async connect(opts: AgentConnect): Promise<Agent> {
-    const { bus, hub, closeHandle } = await connectBus(opts)
-    const a = new Agent(bus)
-    a.hub = hub
-    if (closeHandle !== undefined) a.closeHandle = closeHandle
-    return a
+    const { bus } = await connectBus(opts)
+    return new Agent(bus)
   }
 
   /**
    * Turn this agent into the config authority: it serves startup snapshot
-   * requests, persists values into the KV `cfg` bucket (when caps.kv), and
+   * requests, persists values into the KV `cfg` bucket, and
    * delivers validated changes to extensions. Call once before setConfig.
    */
   async serveConfig(opts: ServeConfigOptions = {}): Promise<void> {
@@ -380,10 +368,6 @@ export class Agent {
   /** Drop per-session config overrides when a session ends. */
   async dropSessionConfig(extId: string, sessionName: string): Promise<void> {
     await this.configAuthority?.dropSession(extId, sessionName)
-  }
-
-  caps() {
-    return this.bus.caps
   }
 
   get rawBus(): Bus {
@@ -567,20 +551,33 @@ export class Agent {
 
   /**
    * Announce a session lifecycle change on abc.session.lifecycle.<kind>
-   * (created / forked / renamed / deleted). Extensions that declared the
-   * kind receive it; on "deleted" this also drops the session's config
-   * overrides for every known extension.
+   * (created / forked / renamed / deleted). forked carries parent, renamed
+   * carries from/to. Extensions that declared the kind receive it; on
+   * "deleted" this also drops the session's config overrides for every
+   * known extension.
    */
   async publishLifecycleEvent(
     kind: 'created' | 'forked' | 'renamed' | 'deleted',
     sessionName: string,
-    payload?: unknown,
+    opts: {
+      parent?: string
+      from?: string
+      to?: string
+      payload?: unknown
+    } = {},
   ): Promise<void> {
-    await this.bus.publish(`abc.session.lifecycle.${kind}`, {
+    const body: Record<string, unknown> = {
       kind,
       session_name: sessionName,
-      payload,
-    })
+    }
+    if (kind === 'forked' && opts.parent !== undefined)
+      body.parent = opts.parent
+    if (kind === 'renamed') {
+      if (opts.from !== undefined) body.from = opts.from
+      if (opts.to !== undefined) body.to = opts.to
+    }
+    if (opts.payload !== undefined) body.payload = opts.payload
+    await this.bus.publish(`abc.session.lifecycle.${kind}`, body)
     if (kind === 'deleted') {
       for (const extId of this.manifestCache.keys()) {
         await this.dropSessionConfig(extId, sessionName).catch(() => {})
@@ -596,8 +593,36 @@ export class Agent {
     return this.bus.objectGet(name)
   }
 
+  /**
+   * Replay the retained session events for a session (abc.session.events.
+   * <token>), oldest first. Returns the raw `{event, params?, eid?}` items;
+   * replay window/retention is a channel property (24h on NATS), and how
+   * much of the replay to show is the consumer's policy.
+   */
+  async replayEvents(
+    sessionName: string,
+  ): Promise<Array<{ event: string; params?: unknown; eid?: string }>> {
+    const out: Array<{ event: string; params?: unknown; eid?: string }> = []
+    const envelopes = await this.bus.replay(CH.sessionEvents(sessionName))
+    for (const env of envelopes) {
+      const p = env.payload as {
+        event?: string
+        params?: unknown
+        eid?: string
+      }
+      if (typeof p?.event === 'string') {
+        const item: { event: string; params?: unknown; eid?: string } = {
+          event: p.event,
+        }
+        if (p.params !== undefined) item.params = p.params
+        if (p.eid !== undefined) item.eid = p.eid
+        out.push(item)
+      }
+    }
+    return out
+  }
+
   async close(): Promise<void> {
-    await this.closeHandle?.()
     return this.bus.close()
   }
 }

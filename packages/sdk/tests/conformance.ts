@@ -1,16 +1,20 @@
 import { describe, expect, it } from 'vitest'
+import { Agent, type MailboxMessageResolved } from '../src/agent/index.js'
 import {
-  type MailboxMessageResolved,
-  Agent,
-} from '../src/agent/index.js'
+  claimSession,
+  isSessionRunning,
+  releaseSession,
+  renewSession,
+  withSessionLease,
+} from '../src/agent/lease.js'
+import type { Bus } from '../src/bus/index.js'
 import {
   Extension,
   publishMailboxEvent,
   publishSessionEvent,
   setSessionVariable,
 } from '../src/extension/index.js'
-import { CH, sessionToken, type LifecycleEvent } from '../src/protocol/index.js'
-import type { Bus, Caps } from '../src/bus/index.js'
+import { CH, type LifecycleEvent, sessionToken } from '../src/protocol/index.js'
 
 export interface Pair {
   agentBus: Bus
@@ -19,13 +23,6 @@ export interface Pair {
 }
 
 export type Factory = () => Promise<Pair> | Pair
-
-const capsOf = async (newPair: Factory): Promise<Caps> => {
-  const { agentBus, cleanup } = await newPair()
-  const caps = agentBus.caps
-  await cleanup()
-  return caps
-}
 
 const serveConfExt = async (bus: Bus): Promise<Extension> => {
   const ext = new Extension(bus, {
@@ -130,7 +127,6 @@ export function runConformance(name: string, newPair: Factory): void {
     })
 
     it('tool offloads large content to the object store', async () => {
-      if (!(await capsOf(newPair)).object) return
       const { agentBus, extensionBus, cleanup } = await newPair()
       const ext = await serveConfExt(extensionBus)
       const a = new Agent(agentBus)
@@ -295,7 +291,6 @@ export function runConformance(name: string, newPair: Factory): void {
     })
 
     it('round-trips the object store', async () => {
-      if (!(await capsOf(newPair)).object) return
       const { agentBus, cleanup } = await newPair()
       const a = new Agent(agentBus)
       await a.putObject('test-obj', new TextEncoder().encode('payload-123'))
@@ -308,7 +303,6 @@ export function runConformance(name: string, newPair: Factory): void {
     })
 
     it('supports kv create/get/cas/delete', async () => {
-      if (!(await capsOf(newPair)).kv) return
       const { agentBus, cleanup } = await newPair()
       const b = new Agent(agentBus).rawBus
       const rev = await b.kvCreate('conf-kv', 'k', 'v1', 60_000)
@@ -342,17 +336,10 @@ export function runConformance(name: string, newPair: Factory): void {
       await cleanupNoop()
     })
 
-    it('declares core caps', async () => {
-      const caps = await capsOf(newPair)
-      expect(caps.requestReply).toBe(true)
-      expect(caps.broadcast).toBe(true)
-      expect(caps.pubSub).toBe(true)
-      expect(caps.durableInbox).toBe(true)
-    })
-
     it('applies a config change on the extension', async () => {
       const { agentBus, extensionBus, cleanup } = await newPair()
-      const applied: Array<{ name: string; value: unknown; session?: string }> = []
+      const applied: Array<{ name: string; value: unknown; session?: string }> =
+        []
       const ext = new Extension(extensionBus, {
         id: 'cfg-ext',
         version: '1.0',
@@ -397,7 +384,9 @@ export function runConformance(name: string, newPair: Factory): void {
 
       const a = new Agent(agentBus)
       await a.discover(300)
-      await expect(a.setConfig('cfg-rej', 'knob', { on: true })).rejects.toThrow()
+      await expect(
+        a.setConfig('cfg-rej', 'knob', { on: true }),
+      ).rejects.toThrow()
       // The old value stays effective.
       expect(ext.getConfig('knob')).toEqual({ on: false })
       await ext.close()
@@ -502,14 +491,13 @@ export function runConformance(name: string, newPair: Factory): void {
       await sleep(50)
 
       const a = new Agent(agentBus)
-      for (const kind of [
-        'created',
-        'forked',
-        'renamed',
-        'deleted',
-      ] as const) {
-        await a.publishLifecycleEvent(kind, 'sess-lc', { k: kind })
-      }
+      await a.publishLifecycleEvent('created', 'sess-lc')
+      await a.publishLifecycleEvent('forked', 'sess-lc', { parent: 'parent-s' })
+      await a.publishLifecycleEvent('renamed', 'sess-lc2', {
+        from: 'sess-lc',
+        to: 'sess-lc2',
+      })
+      await a.publishLifecycleEvent('deleted', 'sess-lc2')
       await sleep(150)
       expect(seen.map(e => e.kind)).toEqual([
         'created',
@@ -517,7 +505,12 @@ export function runConformance(name: string, newPair: Factory): void {
         'renamed',
         'deleted',
       ])
-      expect(seen.every(e => e.session_name === 'sess-lc')).toBe(true)
+      const forked = seen.find(e => e.kind === 'forked')
+      expect(forked?.parent).toBe('parent-s')
+      const renamed = seen.find(e => e.kind === 'renamed')
+      expect(renamed?.from).toBe('sess-lc')
+      expect(renamed?.to).toBe('sess-lc2')
+      expect(seen.every(e => e.session_name !== '')).toBe(true)
       await ext.close()
       await cleanup()
     })
@@ -528,7 +521,10 @@ export function runConformance(name: string, newPair: Factory): void {
         id: 'se-ext',
         version: '1.0',
         tools: {
-          ping: { description: 'p', execute: async () => ({ content: 'pong' }) },
+          ping: {
+            description: 'p',
+            execute: async () => ({ content: 'pong' }),
+          },
         },
       })
       await ext.serve()
@@ -538,12 +534,9 @@ export function runConformance(name: string, newPair: Factory): void {
         subject: CH.sessionEvents('sess-se'),
       })
       await sleep(50)
-      await publishSessionEvent(
-        extensionBus,
-        'sess-se',
-        'todos-updated',
-        { count: 3 },
-      )
+      await publishSessionEvent(extensionBus, 'sess-se', 'todos-updated', {
+        count: 3,
+      })
       const got: unknown[] = []
       void (async () => {
         for await (const m of sub) {
@@ -560,13 +553,54 @@ export function runConformance(name: string, newPair: Factory): void {
       await cleanup()
     })
 
+    it('replays retained session events oldest-first', async () => {
+      const { agentBus, extensionBus, cleanup } = await newPair()
+      const ext = new Extension(extensionBus, {
+        id: 'rp-ext',
+        version: '1.0',
+        tools: {
+          ping: {
+            description: 'p',
+            execute: async () => ({ content: 'pong' }),
+          },
+        },
+      })
+      await ext.serve()
+      await sleep(50)
+
+      await publishSessionEvent(extensionBus, 'sess-rp', 'status', {
+        type: 'busy',
+      })
+      await publishSessionEvent(extensionBus, 'sess-rp', 'text', { t: 'a' })
+      await publishSessionEvent(extensionBus, 'sess-rp', 'turn-complete', {
+        reason: 'end',
+      })
+      await sleep(150)
+
+      const a = new Agent(agentBus)
+      const events = await a.replayEvents('sess-rp')
+      expect(events.map(e => e.event)).toEqual([
+        'status',
+        'text',
+        'turn-complete',
+      ])
+      expect(events.every(e => typeof e.eid === 'string' && e.eid !== '')).toBe(
+        true,
+      )
+      await ext.close()
+      await cleanup()
+    })
+
     it('lets extensions publish into the session mailbox', async () => {
       const { agentBus, extensionBus, cleanup } = await newPair()
       const ext = new Extension(extensionBus, {
         id: 'xm-ext',
         version: '1.0',
         tools: {
-          ping: { description: 'p', execute: async () => ({ content: 'pong' }) },
+          ping: {
+            description: 'p',
+            execute: async () => ({ content: 'pong' }),
+          },
         },
       })
       await ext.serve()
@@ -590,7 +624,6 @@ export function runConformance(name: string, newPair: Factory): void {
     })
 
     it('resolves variables KV-first with extension write-back', async () => {
-      if (!(await capsOf(newPair)).kv) return
       const { agentBus, extensionBus, cleanup } = await newPair()
       const session = `sess-kv-${Date.now()}`
       let resolves = 0
@@ -614,10 +647,61 @@ export function runConformance(name: string, newPair: Factory): void {
       expect(await a.resolveVariable('var-ext', 'ws', session)).toBe(
         `ws-${session}`,
       )
-      await setSessionVariable(extensionBus, 'var-ext', session, 'ws', 'ws-cached')
-      expect(await a.resolveVariable('var-ext', 'ws', session)).toBe('ws-cached')
+      await setSessionVariable(
+        extensionBus,
+        'var-ext',
+        session,
+        'ws',
+        'ws-cached',
+      )
+      expect(await a.resolveVariable('var-ext', 'ws', session)).toBe(
+        'ws-cached',
+      )
       expect(resolves).toBe(1)
       await ext.close()
+      await cleanup()
+    })
+
+    it('enforces the cross-replica session lease', async () => {
+      const { agentBus, cleanup } = await newPair()
+      const session = `sess-lease-${Date.now()}`
+
+      const rev = await claimSession(agentBus, session, 1000)
+      expect(rev).not.toBeNull()
+      // Mutual exclusion: a second claim is refused.
+      expect(await claimSession(agentBus, session, 1000)).toBeNull()
+      expect(await isSessionRunning(agentBus, session)).toBe(true)
+      // Renew with the right revision works; a stale one loses.
+      const next = await renewSession(agentBus, session, rev as number, 1000)
+      expect(next).not.toBeNull()
+      expect(
+        await renewSession(agentBus, session, rev as number, 1000),
+      ).toBeNull()
+      // Release → free again.
+      await releaseSession(agentBus, session)
+      expect(await isSessionRunning(agentBus, session)).toBe(false)
+      expect(await claimSession(agentBus, session, 1000)).not.toBeNull()
+      await releaseSession(agentBus, session)
+      await cleanup()
+    })
+
+    it('withSessionLease refuses concurrent runners and releases after', async () => {
+      const { agentBus, cleanup } = await newPair()
+      const session = `sess-lease-wrap-${Date.now()}`
+      const first = await withSessionLease(
+        agentBus,
+        session,
+        async () => {
+          const second = await withSessionLease(agentBus, session, async () => {
+            throw new Error('should not run')
+          })
+          expect(second.acquired).toBe(false)
+        },
+        1000,
+      )
+      expect(first.acquired).toBe(true)
+      expect(first.lost).toBe(false)
+      expect(await isSessionRunning(agentBus, session)).toBe(false)
       await cleanup()
     })
   })

@@ -17,7 +17,10 @@ export async function serve(opts: {
   const ext = new Extension(opts.bus, opts.config)
   await ext.serve()
 
-  const port = opts.port ?? Number(process.env.ZERGX_PORT ?? 808)
+  // ABC_PORT is the protocol-neutral name; ZERGX_PORT kept as a deployment
+  // compat fallback for existing charts.
+  const port =
+    opts.port ?? Number(process.env.ABC_PORT ?? process.env.ZERGX_PORT ?? 808)
   const ac = new AbortController()
   opts.onStart?.(ext, ac.signal)
 

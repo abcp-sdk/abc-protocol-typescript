@@ -1,13 +1,6 @@
 import type { Envelope } from '../protocol/envelope.js'
 
-export type Caps = {
-  requestReply: boolean
-  broadcast: boolean
-  pubSub: boolean
-  durableInbox: boolean
-  object: boolean
-  kv: boolean
-}
+export type { Envelope }
 
 export type RequestOpts = {
   /** Timeout in ms for a 1:1 request. */
@@ -60,9 +53,11 @@ export interface InboxSubscription {
  * The transport-agnostic message bus. Role logic (agent/extension) depends
  * only on this interface; transports are adapters.
  */
+/**
+ * The transport-agnostic message bus. There is exactly one transport
+ * (NATS); every listed capability is always available (JetStream).
+ */
 export interface Bus {
-  readonly caps: Caps
-
   /** 1:1 request; the transport manages the reply address internally. */
   request(ch: string, payload: unknown, opts?: RequestOpts): Promise<Envelope>
 
@@ -88,6 +83,13 @@ export interface Bus {
 
   /** Durable inbox consume with explicit ack/nak/term. */
   inboxConsume(opts?: InboxConsumeOpts): Promise<InboxSubscription>
+
+  /**
+   * Replay the retained (durably queued) envelopes for a channel, oldest
+   * first. Retention is a transport property (NATS: stream max_age; inproc:
+   * in-memory log); the protocol promise is a bounded recent window.
+   */
+  replay(ch: string): Promise<Envelope[]>
 
   /** Store a (potentially large) object; transports chunk internally. */
   objectPut(name: string, data: Uint8Array): Promise<void>

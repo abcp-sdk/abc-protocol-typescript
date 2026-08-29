@@ -4,7 +4,7 @@
 //   NATS_URL=... npx tsx interop/ts-ext.ts
 import type { ExtensionConfig } from '@abc-protocol/sdk'
 import { Extension } from '@abc-protocol/sdk'
-import { connectNatsBus } from '@abc-protocol/sdk-nats'
+import { connectNatsBus } from '@abc-protocol/sdk'
 
 const config: ExtensionConfig = {
   id: 'ts-ext',

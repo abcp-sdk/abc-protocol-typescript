@@ -2,12 +2,13 @@ import { Agent, Extension } from '@abc-protocol/sdk'
 import { createMockExtensionConfig } from './mock-extension/src/index.js'
 import { runMockAgent } from './mock-agent/src/index.js'
 
-// NATS: agent and extension are equal peers over an external broker.
+// External NATS: agent and extension are equal peers over a broker whose
+// lifecycle the deployment owns (the production form).
 async function main(): Promise<void> {
   const url = process.env.NATS_URL
-  const agent = await Agent.connect({ provider: 'nats', url })
+  const agent = await Agent.connect({ url })
   const ext = await Extension.connect(
-    { provider: 'nats', url },
+    { url },
     createMockExtensionConfig(),
   )
   await ext.serve()

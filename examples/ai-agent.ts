@@ -17,7 +17,7 @@
  *   npx tsx examples/ai-agent.ts --no-llm     # dry loop, no API key needed
  */
 import { Agent } from '@abc-protocol/sdk'
-import { connectNatsBus } from '@abc-protocol/sdk-nats'
+import { connectNatsBus } from '@abc-protocol/sdk'
 import type { ToolResult } from '@abc-protocol/sdk'
 import type { Tool } from 'ai'
 
