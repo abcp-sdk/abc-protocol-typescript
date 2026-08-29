@@ -98,6 +98,10 @@ export interface ExtensionConfig {
 export class Extension {
   readonly manifest: ExtensionManifest
   private unsubs: Array<() => void> = []
+  // In-flight tool calls per session (AbortController per call), so an
+  // interrupt signal aborts that session's awaits (real cancel semantics:
+  // JS cannot kill the running handler, but the call resolves immediately).
+  private inflight = new Map<string, Set<AbortController>>()
   private globalConfig = new Map<string, unknown>()
   private sessionConfig = new Map<string, Map<string, unknown>>()
 
@@ -330,18 +334,29 @@ export class Extension {
             }
             await this.bus.publish(replyTo, res)
           }
+          const ac = new AbortController()
+          if (sessionName !== '') this.trackInflight(sessionName, ac)
+          let settled = false
+          const aborted = new Promise<never>((_, reject) => {
+            ac.signal.addEventListener('abort', () => {
+              if (!settled) reject(new Error('interrupted'))
+            })
+          })
           try {
-            const result = await spec.execute(
-              p.arguments ?? {},
-              p.call_id,
-              sessionName,
-            )
+            const result = await Promise.race([
+              spec.execute(p.arguments ?? {}, p.call_id, sessionName),
+              aborted,
+            ])
+            settled = true
             await respond(result)
           } catch (e) {
+            settled = true
             await respond(undefined, {
               code: 'internal',
               message: String(e),
             })
+          } finally {
+            this.untrackInflight(sessionName, ac)
           }
         }
       })()
@@ -471,15 +486,47 @@ export class Extension {
         const parsed = InterruptSignalSchema.safeParse(env.payload)
         const sig = parsed.success ? parsed.data : undefined
         const sessionName = sig?.session_name ?? env.session_name ?? ''
+        // Abort in-flight awaits first: session-scoped signal cancels that
+        // session only; a signal without a session is a broadcast.
+        this.abortInflight(sessionName === '' ? undefined : sessionName)
         if (this.cfg.onEventHook !== undefined) {
           await this.cfg.onEventHook('interrupt', sessionName, sig?.reason)
         }
       }
     })()
   }
+
+  private trackInflight(session: string, ac: AbortController): void {
+    let set = this.inflight.get(session)
+    if (set === undefined) {
+      set = new Set()
+      this.inflight.set(session, set)
+    }
+    set.add(ac)
+  }
+
+  private untrackInflight(session: string, ac: AbortController): void {
+    if (session === '') return
+    const set = this.inflight.get(session)
+    if (set === undefined) return
+    set.delete(ac)
+    if (set.size === 0) this.inflight.delete(session)
+  }
+
+  /** Abort in-flight awaits; undefined session = broadcast (all). */
+  private abortInflight(session: string | undefined): void {
+    if (session === undefined) {
+      const all = this.inflight
+      this.inflight = new Map()
+      for (const set of all.values()) for (const ac of set) ac.abort()
+      return
+    }
+    const set = this.inflight.get(session)
+    this.inflight.delete(session)
+    if (set !== undefined) for (const ac of set) ac.abort()
+  }
 }
 
-// re-export helpers used by manifest-era callers
 export const VARS_BUCKET = 'vars'
 export function varKey(provider: string, name: string): string {
   return `${provider}.${name}`
@@ -568,3 +615,5 @@ export function setSessionVariable(
     0,
   )
 }
+
+// trackInflight registers a call's AbortController under its session.

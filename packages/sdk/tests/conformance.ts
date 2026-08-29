@@ -33,6 +33,13 @@ const serveConfExt = async (bus: Bus): Promise<Extension> => {
         description: 'echo content',
         execute: async args => ({ content: `echo:${String(args?.msg ?? '')}` }),
       },
+      hang: {
+        description: 'waits until interrupted (interrupt semantics)',
+        execute: async () => {
+          await sleep(30_000)
+          return { content: 'never' }
+        },
+      },
       slow: {
         description: 'sleeps before answering (request-timeout regression)',
         execute: async () => {
@@ -187,6 +194,48 @@ export function runConformance(name: string, newPair: Factory): void {
           }),
         ]),
       ).rejects.toThrow()
+      await ext.close()
+      await cleanup()
+    })
+
+    it('interrupt cancels the in-flight tool of one session only', async () => {
+      const { agentBus, extensionBus, cleanup } = await newPair()
+      const ext = await serveConfExt(extensionBus)
+      const a = new Agent(agentBus)
+      const call = (session: string, callId: string) =>
+        a.callTool(session, 'conf-ext', 'hang', callId, {}).then(tr => tr, () => undefined)
+      const mine = call('sess-int', 'hang-1')
+      const other = call('sess-other', 'hang-2')
+      await sleep(500)
+
+      await a.interrupt('conf-ext', 'sess-int', 'test')
+      const mineRes = await Promise.race([
+        mine,
+        sleep(5000).then(() => {
+          throw new Error('session interrupt did not cancel within 5s')
+        }),
+      ])
+      if (mineRes?.error?.message?.includes('interrupted') !== true) {
+        throw new Error(`interrupted outcome = ${JSON.stringify(mineRes)}`)
+      }
+      // the other session must still be running
+      const otherDone = await Promise.race([
+        other.then(() => true),
+        sleep(700).then(() => false),
+      ])
+      if (otherDone) throw new Error('session-scoped interrupt leaked to other session')
+
+      // broadcast interrupt reaches the remaining session
+      await a.interrupt('conf-ext')
+      const otherRes = await Promise.race([
+        other,
+        sleep(5000).then(() => {
+          throw new Error('broadcast interrupt did not cancel within 5s')
+        }),
+      ])
+      if (otherRes?.error?.message?.includes('interrupted') !== true) {
+        throw new Error(`broadcast outcome = ${JSON.stringify(otherRes)}`)
+      }
       await ext.close()
       await cleanup()
     })
