@@ -56,13 +56,43 @@ async function ensureStreams(nc: NatsConnection): Promise<void> {
     try {
       await jsm.streams.info(s.name)
     } catch {
-      await jsm.streams.add({
-        name: s.name,
-        subjects: s.subjects,
-        max_age: 24 * 3600 * 1_000_000_000,
-      })
+      try {
+        await jsm.streams.add({
+          name: s.name,
+          subjects: s.subjects,
+          max_age: 24 * 3600 * 1_000_000_000,
+        })
+      } catch (err) {
+        // SELF-MIGRATION (0.1 -> 0.2): a pre-0.2 ABC_MAILBOX still declares
+        // abc.session.events.>, which overlaps. Narrow the legacy stream
+        // (mailbox messages preserved) and retry — the fleet must never
+        // crash on the layout migration.
+        if (
+          s.name === STREAM_EVENTS &&
+          String(err).includes('subjects overlap')
+        ) {
+          await migrateLegacyMailbox(jsm)
+          await jsm.streams.add({
+            name: s.name,
+            subjects: s.subjects,
+            max_age: 24 * 3600 * 1_000_000_000,
+          })
+        }
+      }
     }
   }
+}
+
+async function migrateLegacyMailbox(
+  jsm: ReturnType<typeof jetstreamManager> extends Promise<infer R> ? R : never,
+): Promise<void> {
+  const info = await jsm.streams.info(STREAM_MAILBOX)
+  if (!info.config.subjects?.includes('abc.session.events.>')) {
+    throw new Error('overlap not caused by the legacy mailbox layout')
+  }
+  await jsm.streams.update(STREAM_MAILBOX, {
+    subjects: ['abc.mailbox.>'],
+  })
 }
 
 function decode(m: { data: Uint8Array }): Envelope | null {

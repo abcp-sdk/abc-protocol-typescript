@@ -1,3 +1,5 @@
+import { jetstreamManager } from '@nats-io/jetstream'
+import { connect } from '@nats-io/transport-node'
 import { describe, expect, it } from 'vitest'
 import {
   Agent,
@@ -19,8 +21,10 @@ import {
   setSessionVariable,
   type ToolResultData,
 } from '../src/extension/index.js'
+import { start as startNats } from '../src/natsrun/index.js'
 import type { ExtensionManifest } from '../src/protocol/index.js'
 import { CH, type LifecycleEvent, sessionToken } from '../src/protocol/index.js'
+import { connectNatsBus } from '../src/transport/nats/index.js'
 
 export interface Pair {
   agentBus: Bus
