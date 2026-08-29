@@ -6,8 +6,9 @@ import { type Factory, runConformance } from './conformance.js'
 /**
  * Single-transport conformance: one shared nats-server (spawned via
  * natsrun, memory storage) serves the whole suite; every test gets two
- * fresh connections (agent + extension) over the same broker. Falls back
- * to ABC_NATS_URL / NATS_URL when no local nats-server binary exists.
+ * fresh connections (agent + extension) over the same broker. The DLQ/mailbox
+ * cases use unique per-test tags so a shared broker never confuses them.
+ * Falls back to ABC_NATS_URL / NATS_URL when no local binary exists.
  */
 
 let server: Server | null = null
@@ -36,7 +37,11 @@ afterAll(async () => {
 })
 
 const factory: Factory = async () => {
-  if (url === null) throw new Error('no nats-server available')
+  if (url === null) {
+    throw new Error(
+      'no nats-server available (install nats-server or set ABC_NATS_SERVER_BIN / ABC_NATS_URL)',
+    )
+  }
   const agentBus = await connectNatsBus(url)
   const extensionBus = await connectNatsBus(url)
   return {
@@ -49,11 +54,4 @@ const factory: Factory = async () => {
   }
 }
 
-runConformance('nats', async () => {
-  if (url === null) {
-    throw new Error(
-      'no nats-server available (install nats-server or set ABC_NATS_SERVER_BIN / ABC_NATS_URL)',
-    )
-  }
-  return factory()
-})
+runConformance('nats', factory)

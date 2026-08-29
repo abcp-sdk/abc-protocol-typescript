@@ -21,6 +21,7 @@ import {
   type ObjectRef,
   ToolResultSchema,
 } from '../protocol/index.js'
+import { escapeKVSegment } from '../protocol/kv-escaping.js'
 import { type AgentConnect, connectBus } from '../transport/index.js'
 
 export interface ToolResultResolved {
@@ -58,7 +59,7 @@ function kvKey(
   name: string,
 ): string {
   return scope === 'session'
-    ? `${extId}.${sessionName}.${name}`
+    ? `${extId}.${escapeKVSegment(sessionName)}.${name}`
     : `${extId}.${name}`
 }
 
@@ -308,6 +309,10 @@ void ConfigSetSchema
 
 /** Returned by a mailbox handler to terminate a message: delivery stops
  * and (unless noDLQ) the message is copied to the dead-letter stream. */
+/** Default poison-message escalation: after this many nak redeliveries the
+ * consumer terms the message into the dead-letter stream. */
+export const DEFAULT_MAX_NAKS_BEFORE_TERM = 5
+
 export class TermError extends Error {
   constructor(readonly noDLQ = false) {
     super('terminated by consumer')
@@ -506,8 +511,11 @@ export class Agent {
 
   async consumeMailbox(
     handler: (msg: MailboxMessageResolved) => void | Promise<void>,
+    maxNaksBeforeTerm = DEFAULT_MAX_NAKS_BEFORE_TERM,
+    nakDelayMs = 5000,
   ): Promise<() => Promise<void>> {
     const sub = await this.bus.inboxConsume({ subject: MAILBOX_CONSUME })
+    const naks = new Map<string, number>()
     void (async () => {
       for await (const msg of sub) {
         const parsed = MailboxMessageSchema.safeParse(msg.payload)
@@ -517,30 +525,71 @@ export class Agent {
         }
         const p = parsed.data
         const sessionName = msg.session_name ?? ''
-        if (sessionName === '' || typeof msg.id !== 'string' || msg.id === '') {
+        const id = typeof msg.id === 'string' ? msg.id : ''
+        if (sessionName === '' || id === '') {
           await msg.ack()
           continue
         }
         try {
           await handler({
-            id: msg.id,
+            id,
             sessionName,
             type: p.type ?? 'event',
             payload: p.payload,
           })
+          naks.delete(id)
           await msg.ack()
         } catch (err: unknown) {
           const e = err as Error | TermError
           if (e instanceof TermError) {
+            naks.delete(id)
             if (e.noDLQ) await msg.termNoDLQ()
             else await msg.term()
             continue
           }
-          await msg.nak(5000)
+          const n = (naks.get(id) ?? 0) + 1
+          naks.set(id, n)
+          if (n >= maxNaksBeforeTerm) {
+            // poison: park it in the DLQ instead of nak-looping forever
+            naks.delete(id)
+            await msg.term()
+            continue
+          }
+          await msg.nak(nakDelayMs)
         }
       }
     })()
     return () => sub.close()
+  }
+
+  /** Requeue one dead-lettered message (by original id) onto its session's
+   * mailbox with a fresh id, acking the dead-letter copy. The return path
+   * for triage: fix the consumer, then requeue the parked payloads. */
+  async requeueDLQ(id: string, timeoutMs = 10_000): Promise<boolean> {
+    const sub = await this.bus.inboxConsume({ subject: 'abc.dlq.>' })
+    const deadline = Date.now() + timeoutMs
+    try {
+      for await (const msg of sub) {
+        if (Date.now() >= deadline) return false
+        const parsed = MailboxMessageSchema.safeParse(msg.payload)
+        const sessionName = msg.session_name ?? ''
+        const mid = typeof msg.id === 'string' ? msg.id : ''
+        if (!parsed.success || sessionName === '' || mid !== id) {
+          await msg.nak(500).catch(() => {})
+          continue
+        }
+        await this.publishMailbox(
+          sessionName,
+          parsed.data.type ?? 'event',
+          parsed.data.payload,
+        )
+        await msg.ack()
+        return true
+      }
+    } catch {
+      await sub.close()
+    }
+    return false
   }
 
   /** Fire a sync call-hook; returns false when it failed. */

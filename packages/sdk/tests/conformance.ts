@@ -817,6 +817,40 @@ export function runConformance(name: string, newPair: Factory): void {
       await cleanup()
     })
 
+    it('session config keys survive dot-session names (KV escaping)', async () => {
+      const { agentBus, extensionBus, cleanup } = await newPair()
+      const a = new Agent(agentBus)
+      await a.serveConfig()
+      const sess = 'weird.session.name:main'
+      await a.setConfig('conf-ext', 'dots', 'escaped-ok', sess, {
+        manifest: {
+          id: 'conf-ext',
+          version: '1.0',
+          config: [{ name: 'dots', type: 'string', scope: 'session' }],
+        } as unknown as ExtensionManifest,
+      })
+      const ext = new Extension(extensionBus, {
+        id: 'conf-ext',
+        version: '1.0',
+        config: { dots: { type: 'string', scope: 'session' } },
+      })
+      await ext.serve()
+      const deadline = Date.now() + 10_000
+      while (
+        ext.getConfig('dots', sess) !== 'escaped-ok' &&
+        Date.now() < deadline
+      ) {
+        await sleep(200)
+      }
+      if (ext.getConfig('dots', sess) !== 'escaped-ok') {
+        throw new Error(
+          `dot session config not recovered: ${String(ext.getConfig('dots', sess))}`,
+        )
+      }
+      await ext.close()
+      await cleanup()
+    })
+
     it('lets extensions publish into the session mailbox', async () => {
       const { agentBus, extensionBus, cleanup } = await newPair()
       const ext = new Extension(extensionBus, {

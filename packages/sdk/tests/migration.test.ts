@@ -31,7 +31,9 @@ describe('abc migration: 0.1 -> 0.2 stream layout', () => {
       void Extension
       await bus.close()
     } finally {
+      // generous teardown: the nats-runner's async error path can leave the
+      // child briefly; give the stop a moment with retries
       await server.stop()
     }
   })
-})
+}, 30_000)

@@ -18,6 +18,7 @@ import {
   ToolCallEnvelopeSchema,
   type ToolResult,
 } from '../protocol/index.js'
+import { unescapeKVSegment } from '../protocol/kv-escaping.js'
 import { connectBus, type ExtensionConnect } from '../transport/index.js'
 
 const OFFLOAD_THRESHOLD = 256 * 1024
@@ -514,13 +515,20 @@ export class Extension {
    * or <extId>.<session>.<name> (session). Envelope {r,v} with a
    * bare-value fallback for pre-0.2 entries. */
   private applyConfigKV(ev: KvEvent): void {
+    // Key layout: <extId>.<name> (global) or <extId>.<escapedSession>.<name>.
+    // The session segment is escaped (v0.2.2+); legacy colon-style session
+    // names parse identically (their segments carry no dots).
     const rest = ev.key.slice(this.cfg.id.length + 1)
-    const parts = rest.split('.').filter(p => p !== '')
-    const [p0, p1] = parts
-    if (p0 === undefined) return
+    const i = rest.indexOf('.')
+    if (i === -1) {
+      if (!ev.deleted) this.applyConfigValue('', rest, ev.value)
+      else this.globalConfig.delete(rest)
+      return
+    }
+    const session = unescapeKVSegment(rest.slice(0, i))
+    const name = rest.slice(i + 1)
     if (ev.deleted) {
-      if (parts.length === 1) this.globalConfig.delete(p0)
-      else if (p1 !== undefined) this.sessionConfig.get(p0)?.delete(p1)
+      this.sessionConfig.get(session)?.delete(name)
       return
     }
     let v: unknown
@@ -535,11 +543,29 @@ export class Extension {
       return
     }
     if (v === undefined || v === null) return
-    if (parts.length === 1) this.globalConfig.set(p0, v)
-    else if (p1 !== undefined) {
-      const m = this.sessionConfig.get(p0) ?? new Map()
-      m.set(p1, v)
-      this.sessionConfig.set(p0, m)
+    const m = this.sessionConfig.get(session) ?? new Map()
+    m.set(name, v)
+    this.sessionConfig.set(session, m)
+  }
+
+  private applyConfigValue(session: string, name: string, value: string): void {
+    let v: unknown
+    try {
+      const parsed = JSON.parse(value) as { r?: number; v?: unknown }
+      if (parsed !== null && typeof parsed === 'object' && 'v' in parsed) {
+        v = parsed.v
+      } else {
+        v = parsed
+      }
+    } catch {
+      return
+    }
+    if (v === undefined || v === null) return
+    if (session === '') this.globalConfig.set(name, v)
+    else {
+      const m = this.sessionConfig.get(session) ?? new Map()
+      m.set(name, v)
+      this.sessionConfig.set(session, m)
     }
   }
 
