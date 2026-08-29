@@ -1,0 +1,627 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ABC Protocol",
+    "version": "0.1.0",
+    "description": "Agent Bus Communication Protocol — wire contract between an agent and extension servers. Generated from the zod schemas (@abc-protocol/sdk)."
+  },
+  "components": {
+    "schemas": {
+      "Envelope": {
+        "type": "object",
+        "properties": {
+          "v": {
+            "type": "integer",
+            "default": 1
+          },
+          "ch": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "req",
+              "pub",
+              "queue"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "session_name": {
+            "type": "string"
+          },
+          "reply_to": {
+            "type": "string"
+          },
+          "payload": {
+            "description": "Opaque business body."
+          }
+        },
+        "required": [
+          "ch",
+          "kind"
+        ]
+      },
+      "ErrorPayload": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "permission_denied",
+              "retryable",
+              "invalid_argument",
+              "not_found",
+              "internal",
+              "business"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ]
+      },
+      "ObjectRef": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "content_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "ToolCallEnvelope": {
+        "type": "object",
+        "properties": {
+          "call_id": {
+            "type": "string"
+          },
+          "arguments": {
+            "type": "object",
+            "additionalProperties": {},
+            "description": "Arbitrary key/value tool arguments."
+          }
+        },
+        "required": [
+          "call_id",
+          "arguments"
+        ]
+      },
+      "ToolResult": {
+        "type": "object",
+        "properties": {
+          "call_id": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "data": {
+            "description": "Opaque structured JSON result."
+          },
+          "object": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "content_type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "permission_denied",
+                  "retryable",
+                  "invalid_argument",
+                  "not_found",
+                  "internal",
+                  "business"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          },
+          "metadata": {
+            "description": "Opaque metadata."
+          }
+        },
+        "required": [
+          "call_id",
+          "tool"
+        ]
+      },
+      "ToolProgress": {
+        "type": "object",
+        "properties": {
+          "call_id": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string"
+          },
+          "progress": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "text": {
+            "type": "string"
+          },
+          "metadata": {
+            "description": "Opaque UI metadata."
+          }
+        },
+        "required": [
+          "call_id"
+        ]
+      },
+      "MailboxMessage": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "payload": {
+            "description": "Opaque message body."
+          }
+        },
+        "required": [
+          "id",
+          "type"
+        ]
+      },
+      "ExtensionTool": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "input_schema": {
+            "type": "object",
+            "additionalProperties": {},
+            "description": "JSON Schema describing tool input."
+          }
+        },
+        "required": [
+          "name",
+          "description"
+        ]
+      },
+      "ExtensionVariable": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "global",
+              "session"
+            ],
+            "default": "global"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "ExtensionVariableValue": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ]
+      },
+      "ExtensionManifest": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "tools",
+                "prompt"
+              ]
+            },
+            "default": []
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "input_schema": {
+                  "type": "object",
+                  "additionalProperties": {},
+                  "description": "JSON Schema describing tool input."
+                }
+              },
+              "required": [
+                "name",
+                "description"
+              ]
+            }
+          },
+          "prompt": {
+            "type": "object",
+            "properties": {
+              "variables": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "scope": {
+                      "type": "string",
+                      "enum": [
+                        "global",
+                        "session"
+                      ],
+                      "default": "global"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ]
+                }
+              }
+            }
+          },
+          "hooks": {
+            "type": "object",
+            "properties": {
+              "call": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "event": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "config": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "enum",
+                    "json"
+                  ]
+                },
+                "enum_values": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "default": {
+                  "description": "Default value when unset."
+                },
+                "description": {
+                  "type": "string"
+                },
+                "scope": {
+                  "type": "string",
+                  "enum": [
+                    "global",
+                    "session"
+                  ],
+                  "default": "global"
+                }
+              },
+              "required": [
+                "name",
+                "type"
+              ]
+            }
+          },
+          "lifecycle": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "created",
+                "forked",
+                "renamed",
+                "deleted"
+              ]
+            }
+          }
+        },
+        "required": [
+          "id",
+          "version"
+        ]
+      },
+      "HookCall": {
+        "type": "object",
+        "properties": {
+          "hook": {
+            "type": "string"
+          },
+          "session_name": {
+            "type": "string"
+          },
+          "arguments": {
+            "type": "object",
+            "additionalProperties": {},
+            "description": "Arbitrary hook arguments."
+          }
+        },
+        "required": [
+          "hook",
+          "session_name"
+        ]
+      },
+      "HookEvent": {
+        "type": "object",
+        "properties": {
+          "hook": {
+            "type": "string"
+          },
+          "session_name": {
+            "type": "string"
+          },
+          "payload": {
+            "description": "Opaque event body."
+          }
+        },
+        "required": [
+          "hook",
+          "session_name"
+        ]
+      },
+      "HookResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "permission_denied",
+                  "retryable",
+                  "invalid_argument",
+                  "not_found",
+                  "internal",
+                  "business"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          },
+          "data": {
+            "description": "Opaque hook result data."
+          }
+        },
+        "required": [
+          "ok"
+        ]
+      },
+      "InterruptSignal": {
+        "type": "object",
+        "properties": {
+          "session_name": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "ExtensionConfigItem": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "string",
+              "number",
+              "boolean",
+              "enum",
+              "json"
+            ]
+          },
+          "enum_values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "default": {
+            "description": "Default value when unset."
+          },
+          "description": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "global",
+              "session"
+            ],
+            "default": "global"
+          }
+        },
+        "required": [
+          "name",
+          "type"
+        ]
+      },
+      "ConfigSet": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "description": "Validated config value."
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "global",
+              "session"
+            ]
+          },
+          "session_name": {
+            "type": "string"
+          },
+          "ack": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "required": [
+          "name",
+          "revision",
+          "scope"
+        ]
+      },
+      "ConfigSnapshot": {
+        "type": "object",
+        "properties": {
+          "global": {
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "sessions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": {}
+            }
+          }
+        },
+        "required": [
+          "global",
+          "sessions"
+        ]
+      },
+      "LifecycleEvent": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "created",
+              "forked",
+              "renamed",
+              "deleted"
+            ]
+          },
+          "session_name": {
+            "type": "string"
+          },
+          "previous_name": {
+            "type": "string"
+          },
+          "payload": {
+            "description": "Opaque kind-specific body."
+          }
+        },
+        "required": [
+          "kind",
+          "session_name"
+        ]
+      }
+    },
+    "parameters": {}
+  },
+  "paths": {},
+  "webhooks": {}
+}
