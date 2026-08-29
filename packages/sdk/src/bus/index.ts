@@ -42,6 +42,16 @@ export interface InboxMsg extends Envelope {
   nak(delayMs?: number): Promise<void>
   /** Poison: drop permanently. */
   term(): Promise<void>
+  /** Terminate without copying to the dead-letter stream. */
+  termNoDLQ(): Promise<void>
+}
+
+export interface KvEvent {
+  key: string
+  value: string
+  revision: number
+  deleted: boolean
+  isUpdate: boolean
 }
 
 export interface InboxSubscription {
@@ -114,6 +124,17 @@ export interface Bus {
   ): Promise<void>
 
   /** Read a key; null when absent/expired. */
+  /** Watch bucket entries matching keys (NATS wildcard). Snapshot entries
+   * arrive first, then live updates. NOTE: isUpdate is advisory — some
+   * client versions mark replayed snapshot entries as updates; consumers
+   * must be idempotent (apply-by-revision), not snapshot/update-sensitive. */
+  kvWatch(
+    bucket: string,
+    keys: string,
+  ): Promise<{
+    stream: AsyncIterable<KvEvent>
+    stop(): Promise<void>
+  }>
   kvGet(bucket: string, key: string): Promise<string | null>
 
   /** Compare-and-swap; returns the new revision or null when lost. */

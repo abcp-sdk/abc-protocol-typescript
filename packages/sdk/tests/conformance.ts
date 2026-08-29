@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { Agent, type MailboxMessageResolved } from '../src/agent/index.js'
+import {
+  Agent,
+  type MailboxMessageResolved,
+  TermError,
+} from '../src/agent/index.js'
 import {
   claimSession,
   isSessionRunning,
@@ -13,7 +17,9 @@ import {
   publishMailboxEvent,
   publishSessionEvent,
   setSessionVariable,
+  type ToolResultData,
 } from '../src/extension/index.js'
+import type { ExtensionManifest } from '../src/protocol/index.js'
 import { CH, type LifecycleEvent, sessionToken } from '../src/protocol/index.js'
 
 export interface Pair {
@@ -657,6 +663,152 @@ export function runConformance(name: string, newPair: Factory): void {
       expect(events.every(e => typeof e.eid === 'string' && e.eid !== '')).toBe(
         true,
       )
+      await ext.close()
+      await cleanup()
+    })
+
+    it('term routes to the dead-letter stream; ack/discard do not', async () => {
+      const { agentBus, cleanup } = await newPair()
+      const a = new Agent(agentBus)
+      await a.publishMailbox('sess-dlq', 'poison', { bad: true })
+      await a.publishMailbox('sess-dlq', 'healthy', { ok: true })
+      await a.publishMailbox('sess-dlq', 'discard', { gone: true })
+
+      let healthySeen = false
+      const stop = await a.consumeMailbox(m => {
+        if (m.type === 'poison') throw new TermError()
+        if (m.type === 'discard') throw new TermError(true)
+        healthySeen = true
+      })
+      const deadline = Date.now() + 10_000
+      while (!healthySeen && Date.now() < deadline) await sleep(200)
+      if (!healthySeen) throw new Error('healthy message never consumed')
+      await stop()
+
+      const dlq: string[] = []
+      const dlqStop = await a.consumeDLQ(m => {
+        dlq.push(m.type)
+      })
+      const dlqDeadline = Date.now() + 10_000
+      while (dlq.length < 1 && Date.now() < dlqDeadline) await sleep(200)
+      await dlqStop()
+      if (dlq.length !== 1 || dlq[0] !== 'poison') {
+        throw new Error(
+          `DLQ contents = ${JSON.stringify(dlq)}, want exactly ["poison"]`,
+        )
+      }
+      await cleanup()
+    })
+
+    it('tool observes the abort signal (cooperative cleanup)', async () => {
+      const { agentBus, extensionBus, cleanup } = await newPair()
+      let observed = ''
+      const ext = new Extension(extensionBus, {
+        id: 'conf-ext',
+        version: '1.0',
+        tools: {
+          watch: {
+            description: 'watches the abort signal',
+            execute: (_args, _callId, _session, signal) =>
+              new Promise<ToolResultData | undefined>(() => {
+                signal?.addEventListener('abort', () => {
+                  observed = 'cleaned'
+                })
+              }),
+          },
+        },
+      })
+      await ext.serve()
+      const a = new Agent(agentBus)
+      const pending = a.callTool('sess-sig', 'conf-ext', 'watch', 'w1', {})
+      await sleep(500)
+      await a.interrupt('conf-ext', 'sess-sig', 'cleanup-test')
+      const res = await pending.catch(() => undefined)
+      if (!String(res?.error?.message ?? '').includes('interrupted')) {
+        throw new Error(`interrupted outcome = ${JSON.stringify(res)}`)
+      }
+      const deadline = Date.now() + 5_000
+      while (observed !== 'cleaned' && Date.now() < deadline) await sleep(100)
+      if (observed !== 'cleaned')
+        throw new Error('signal never aborted for the handler')
+      await ext.close()
+      await cleanup()
+    })
+
+    it('kv watch: snapshot, then live updates and deletes', async () => {
+      const { agentBus, cleanup } = await newPair()
+      await agentBus.kvPut('watch-test', 'k.a', '1', 0)
+      const { stream, stop } = await agentBus.kvWatch('watch-test', 'k.>')
+      const it = stream[Symbol.asyncIterator]()
+      const next = async () => (await it.next()).value
+      let ev = await next()
+      if (ev?.key !== 'k.a' || ev.value !== '1') {
+        throw new Error(`snapshot event = ${JSON.stringify(ev)}`)
+      }
+      await agentBus.kvPut('watch-test', 'k.b', '2', 0)
+      ev = await next()
+      if (ev?.key !== 'k.b' || ev.value !== '2') {
+        throw new Error(`update event = ${JSON.stringify(ev)}`)
+      }
+      await agentBus.kvDelete('watch-test', 'k.b')
+      ev = await next()
+      if (ev?.key !== 'k.b' || !ev.deleted) {
+        throw new Error(`delete event = ${JSON.stringify(ev)}`)
+      }
+      await stop()
+      await cleanup()
+    })
+
+    it('config recovers from the cfg KV bucket after extension restart', async () => {
+      const { agentBus, extensionBus, cleanup } = await newPair()
+      const a = new Agent(agentBus)
+      await a.serveConfig()
+      const manifest = {
+        id: 'conf-ext',
+        version: '1.0',
+        config: [{ name: 'recovered', type: 'string' }],
+      } as const
+      await a.setConfig('conf-ext', 'recovered', 'hello-kv', undefined, {
+        manifest: manifest as unknown as ExtensionManifest,
+      })
+
+      // extension boots AFTER the set: state must arrive via the KV watch
+      const ext = new Extension(extensionBus, {
+        id: 'conf-ext',
+        version: '1.0',
+        config: { recovered: { type: 'string', default: 'fallback' } },
+      })
+      await ext.serve()
+      const deadline = Date.now() + 10_000
+      while (
+        ext.getConfig('recovered') !== 'hello-kv' &&
+        Date.now() < deadline
+      ) {
+        await sleep(200)
+      }
+      if (ext.getConfig('recovered') !== 'hello-kv') {
+        throw new Error(
+          `config not recovered; got ${String(ext.getConfig('recovered'))}`,
+        )
+      }
+      await ext.close()
+      await cleanup()
+    })
+
+    it('presence: serving extensions appear in the abc-presence bucket', async () => {
+      const { agentBus, extensionBus, cleanup } = await newPair()
+      const ext = await serveConfExt(extensionBus)
+      const deadline = Date.now() + 10_000
+      let raw: string | null = null
+      while (Date.now() < deadline) {
+        raw = await agentBus.kvGet('abc-presence', 'conf-ext')
+        if (raw !== null) break
+        await sleep(200)
+      }
+      if (raw === null)
+        throw new Error('extension never appeared in the presence bucket')
+      if (!raw.includes('conf-ext'))
+        throw new Error(`presence value not a manifest: ${raw}`)
       await ext.close()
       await cleanup()
     })

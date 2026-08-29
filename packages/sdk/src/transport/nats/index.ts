@@ -24,19 +24,44 @@ import type {
 import { EnvelopeSchema, sessionToken } from '../../protocol/index.js'
 
 const STREAM_MAILBOX = 'ABC_MAILBOX'
+const STREAM_EVENTS = 'ABC_EVENTS'
+const STREAM_DLQ = 'ABC_DLQ'
 const INBOX_WILDCARD = 'abc.mailbox.>'
+const EVENTS_PREFIX = 'abc.session.events.'
+const DLQ_PREFIX = 'abc.dlq.'
 const OBJECT_BUCKET = 'ABC_TOOL'
 
-async function ensureMailboxStream(nc: NatsConnection): Promise<void> {
+// Two streams, two consumption models: the mailbox is a work queue
+// (competing consumers, ack on done), session events are a replayable
+// per-session log. Subjects are disjoint by design.
+function streamFor(subject: string): string {
+  if (subject.startsWith(EVENTS_PREFIX)) return STREAM_EVENTS
+  if (subject.startsWith(DLQ_PREFIX)) return STREAM_DLQ
+  return STREAM_MAILBOX
+}
+
+// dlqSubjectFor maps an original queue subject to its dead-letter subject.
+function dlqSubjectFor(subject: string): string {
+  const token = subject.substring(subject.lastIndexOf('.') + 1)
+  return DLQ_PREFIX + token
+}
+
+async function ensureStreams(nc: NatsConnection): Promise<void> {
   const jsm = await jetstreamManager(nc)
-  try {
-    await jsm.streams.info(STREAM_MAILBOX)
-  } catch {
-    await jsm.streams.add({
-      name: STREAM_MAILBOX,
-      subjects: ['abc.mailbox.>', 'abc.session.events.>'],
-      max_age: 24 * 3600 * 1_000_000_000,
-    })
+  for (const s of [
+    { name: STREAM_MAILBOX, subjects: ['abc.mailbox.>'] },
+    { name: STREAM_EVENTS, subjects: ['abc.session.events.>'] },
+    { name: STREAM_DLQ, subjects: ['abc.dlq.>'] },
+  ]) {
+    try {
+      await jsm.streams.info(s.name)
+    } catch {
+      await jsm.streams.add({
+        name: s.name,
+        subjects: s.subjects,
+        max_age: 24 * 3600 * 1_000_000_000,
+      })
+    }
   }
 }
 
@@ -143,7 +168,7 @@ export class NatsBus implements Bus {
         ? 'abc-mailbox-push'
         : `abc-mailbox-push-${sessionToken(subject)}`
     await jsm.consumers
-      .add(STREAM_MAILBOX, {
+      .add(streamFor(subject), {
         durable_name: durable,
         ack_policy: 'explicit',
         filter_subjects: [subject],
@@ -153,11 +178,12 @@ export class NatsBus implements Bus {
       })
       .catch(() => {})
     const js = jetstream(this.nc)
-    const consumer = await js.consumers.get(STREAM_MAILBOX, durable)
+    const consumer = await js.consumers.get(streamFor(subject), durable)
     const messages = await consumer.consume()
+    const nc = this.nc
     return {
       [Symbol.asyncIterator]() {
-        return inboxIter(messages)
+        return inboxIter(nc, messages)
       },
       async close() {
         await messages.close()
@@ -203,6 +229,31 @@ export class NatsBus implements Bus {
     const kv = await this.openKv(bucket, ttlMs)
     await kv.put(key, Buffer.from(value))
   }
+  async kvWatch(
+    bucket: string,
+    keys: string,
+  ): Promise<{
+    stream: AsyncIterable<import('../../bus/index.js').KvEvent>
+    stop(): Promise<void>
+  }> {
+    const kv = await this.openKv(bucket, 0)
+    const iter = await kv.watch({ key: keys })
+    const stream: AsyncIterable<import('../../bus/index.js').KvEvent> =
+      (async function* () {
+        for await (const e of iter) {
+          const deleted = e.operation === 'DEL' || e.operation === 'PURGE'
+          yield {
+            key: e.key,
+            value: deleted ? '' : e.string(),
+            revision: e.revision,
+            deleted,
+            isUpdate: e.isUpdate,
+          }
+        }
+      })()
+    return { stream, stop: async () => iter.stop() }
+  }
+
   async kvGet(bucket: string, key: string): Promise<string | null> {
     try {
       const kv = await new Kvm(this.nc).open(bucket)
@@ -265,7 +316,7 @@ export class NatsBus implements Bus {
     // Ephemeral consumer (no durable name) over the mailbox stream,
     // filtered to the exact subject, delivering the whole retained window.
     const consumer = await jsm.consumers
-      .add('ABC_MAILBOX', {
+      .add(streamFor(ch), {
         filter_subjects: [ch],
         ack_policy: 'explicit',
         deliver_policy: 'all',
@@ -275,7 +326,7 @@ export class NatsBus implements Bus {
     if (consumer === null) return out
     try {
       const js = jetstream(this.nc)
-      const c = await js.consumers.get('ABC_MAILBOX', consumer.name)
+      const c = await js.consumers.get(streamFor(ch), consumer.name)
       // fetch() terminates after `expires` — bounded replay, no live tail.
       const messages = await c.fetch({ expires: 1_000, max_messages: 1024 })
       for await (const m of messages) {
@@ -286,7 +337,7 @@ export class NatsBus implements Bus {
     } catch {
       // Stream missing / no retained messages — empty replay.
     }
-    await jsm.consumers.delete('ABC_MAILBOX', consumer.name).catch(() => {})
+    await jsm.consumers.delete(streamFor(ch), consumer.name).catch(() => {})
     return out
   }
 
@@ -308,6 +359,7 @@ async function* decodeIter(sub: NatsSub): AsyncGenerator<Envelope> {
 }
 
 async function* inboxIter(
+  nc: NatsConnection,
   messages: ConsumerMessages,
 ): AsyncGenerator<InboxMsg> {
   for await (const m of messages) {
@@ -316,7 +368,16 @@ async function* inboxIter(
     const msg = env as InboxMsg
     msg.ack = () => Promise.resolve(m.ack())
     msg.nak = (delayMs?: number) => Promise.resolve(m.nak(delayMs))
-    msg.term = () => Promise.resolve(m.term())
+    // Term copies the message to the dead-letter stream first.
+    msg.term = async () => {
+      const js = jetstream(nc)
+      const opts = env.id !== undefined ? { msgID: env.id } : {}
+      await js
+        .publish(dlqSubjectFor(m.subject), Buffer.from(m.data), opts)
+        .catch(() => {})
+      await m.term()
+    }
+    msg.termNoDLQ = () => Promise.resolve(m.term())
     yield msg
   }
 }
@@ -324,7 +385,7 @@ async function* inboxIter(
 export async function connectNatsBus(url?: string): Promise<NatsBus> {
   const servers = url ?? process.env.NATS_URL ?? 'nats://127.0.0.1:4222'
   const nc = await connect({ servers })
-  await ensureMailboxStream(nc)
+  await ensureStreams(nc)
   return new NatsBus(nc)
 }
 

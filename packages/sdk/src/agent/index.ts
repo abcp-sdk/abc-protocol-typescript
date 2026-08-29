@@ -1,5 +1,10 @@
 import type { Bus } from '../bus/index.js'
-import { sessionVarKey, VARS_BUCKET, varKey } from '../extension/index.js'
+import {
+  PRESENCE_BUCKET,
+  sessionVarKey,
+  VARS_BUCKET,
+  varKey,
+} from '../extension/index.js'
 import {
   CH,
   ConfigSetSchema,
@@ -84,19 +89,9 @@ class ConfigAuthority {
     for (const extId of this.declarations.keys()) {
       await this.recover(extId)
     }
-    // Serve snapshot requests for every declared extension.
-    const sub = await this.bus.subscribe(CH.configWildcard())
-    void (async () => {
-      for await (const env of sub) {
-        const extId = env.ch.slice('abc.config.get.'.length)
-        if (env.reply_to === undefined) continue
-        const snap = this.snapshot(extId)
-        await this.bus.publish(env.reply_to, snap)
-      }
-    })()
-    this.unsub = async () => {
-      await sub.close()
-    }
+    // Snapshot serving moved to the cfg KV bucket (0.2): extensions
+    // recover state by reading/watching it; no abc.config.get serving.
+    this.unsub = async () => {}
   }
 
   async stop(): Promise<void> {
@@ -117,10 +112,14 @@ class ConfigAuthority {
         kvKey(extId, 'global', '', item.name),
       )
       if (raw !== null) {
-        try {
-          this.global.get(extId)?.set(item.name, [0, JSON.parse(raw)])
-        } catch {
-          /* ignore malformed */
+        // envelope {r, v} with a bare-value fallback (pre-0.2 entries)
+        const parsed = JSON.parse(raw) as { r?: number; v?: unknown }
+        if (parsed !== null && typeof parsed === 'object' && 'v' in parsed) {
+          this.global
+            .get(extId)
+            ?.set(item.name, [Number(parsed.r ?? 0), parsed.v])
+        } else {
+          this.global.get(extId)?.set(item.name, [0, parsed])
         }
       }
     }
@@ -193,11 +192,12 @@ class ConfigAuthority {
       this.sessions.set(manifest.id, sess)
     }
 
-    // Persist first (crash-safe): KV mirror, when supported.
+    // Persist first (crash-safe): the cfg KV bucket is the source of truth;
+    // the revision rides along so a restarted agent restores counters.
     await this.bus.kvPut(
       CONFIG_KV_BUCKET,
       kvKey(manifest.id, scope, sessionName ?? '', name),
-      JSON.stringify(value),
+      JSON.stringify({ r: revision, v: value }),
       0,
     )
 
@@ -222,10 +222,9 @@ class ConfigAuthority {
       .catch(() => null)
     if (!useAck) return
     if (reply === null) {
-      throw {
-        code: 'retryable',
-        message: 'extension did not answer the config change',
-      } satisfies ConfigError
+      // Delivery is best-effort in the 0.2 model: the value is committed to
+      // the cfg KV bucket; an offline extension recovers via its KV watch.
+      return
     }
     const parsed = HookResponseSchema.safeParse(reply.payload)
     if (parsed.success && !parsed.data.ok) {
@@ -307,6 +306,14 @@ type z_infer_ConfigSnapshot = {
 void ConfigSnapshotSchema
 void ConfigSetSchema
 
+/** Returned by a mailbox handler to terminate a message: delivery stops
+ * and (unless noDLQ) the message is copied to the dead-letter stream. */
+export class TermError extends Error {
+  constructor(readonly noDLQ = false) {
+    super('terminated by consumer')
+  }
+}
+
 export class Agent {
   /** Transport ownership handle (inproc/ws hub) when Agent.connect started it. */
   hub?: unknown
@@ -375,6 +382,13 @@ export class Agent {
   }
 
   async discover(maxWaitMs = 500): Promise<ExtensionManifest[]> {
+    // Presence-first: extensions heartbeat manifests into the abc-presence
+    // KV bucket; the watcher keeps the cache live (offline extensions drop
+    // out via key TTL). Only a cold cache falls back to the broadcast.
+    await this.ensurePresence()
+    if (this.manifestCache.size > 0) {
+      return [...this.manifestCache.values()]
+    }
     const replies = await this.bus.requestMany(CH.DISCOVER, {}, { maxWaitMs })
     const out: ExtensionManifest[] = []
     const seen = new Set<string>()
@@ -386,6 +400,32 @@ export class Agent {
       out.push(m.data)
     }
     return out
+  }
+
+  private presenceStarted = false
+  private presenceStops: Array<() => Promise<void>> = []
+
+  private async ensurePresence(): Promise<void> {
+    if (this.presenceStarted) return
+    this.presenceStarted = true
+    try {
+      const { stream, stop } = await this.bus.kvWatch(PRESENCE_BUCKET, '>')
+      this.presenceStops.push(async () => {
+        await stop()
+      })
+      void (async () => {
+        for await (const ev of stream) {
+          if (ev.deleted) {
+            this.manifestCache.delete(ev.key)
+            continue
+          }
+          const m = ExtensionManifestSchema.safeParse(JSON.parse(ev.value))
+          if (m.success) this.manifestCache.set(m.data.id, m.data)
+        }
+      })()
+    } catch {
+      this.presenceStarted = false // retry on the next discover
+    }
   }
 
   async callTool(
@@ -453,7 +493,7 @@ export class Agent {
 
   async publishMailbox(
     sessionName: string,
-    type: 'user_prompt' | 'interrupt' | 'event',
+    type: string,
     payload: unknown,
   ): Promise<void> {
     const id = crypto.randomUUID()
@@ -489,7 +529,13 @@ export class Agent {
             payload: p.payload,
           })
           await msg.ack()
-        } catch {
+        } catch (err: unknown) {
+          const e = err as Error | TermError
+          if (e instanceof TermError) {
+            if (e.noDLQ) await msg.termNoDLQ()
+            else await msg.term()
+            continue
+          }
           await msg.nak(5000)
         }
       }
@@ -585,6 +631,34 @@ export class Agent {
     }
   }
 
+  async consumeDLQ(
+    handler: (msg: MailboxMessageResolved) => void | Promise<void>,
+  ): Promise<() => Promise<void>> {
+    const sub = await this.bus.inboxConsume({ subject: 'abc.dlq.>' })
+    void (async () => {
+      for await (const msg of sub) {
+        const parsed = MailboxMessageSchema.safeParse(msg.payload)
+        const sessionName = msg.session_name ?? ''
+        if (!parsed.success || sessionName === '') {
+          await msg.termNoDLQ()
+          continue
+        }
+        try {
+          await handler({
+            id: msg.id ?? '',
+            sessionName,
+            type: parsed.data.type ?? 'event',
+            payload: parsed.data.payload,
+          })
+          await msg.ack()
+        } catch {
+          await msg.nak(5000)
+        }
+      }
+    })()
+    return () => sub.close()
+  }
+
   async putObject(name: string, data: Uint8Array): Promise<void> {
     return this.bus.objectPut(name, data)
   }
@@ -623,6 +697,8 @@ export class Agent {
   }
 
   async close(): Promise<void> {
+    for (const stop of this.presenceStops) await stop().catch(() => {})
+    this.presenceStops = []
     return this.bus.close()
   }
 }

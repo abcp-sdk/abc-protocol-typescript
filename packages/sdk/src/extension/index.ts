@@ -1,4 +1,4 @@
-import type { Bus } from '../bus/index.js'
+import type { Bus, KvEvent } from '../bus/index.js'
 import {
   CH,
   ConfigSetSchema,
@@ -25,10 +25,14 @@ const OFFLOAD_THRESHOLD = 256 * 1024
 export interface ToolSpec {
   description: string
   inputSchema?: Record<string, unknown>
+  /** Optional 4th parameter: aborted when this call is interrupted. The
+   * await resolves immediately with an `interrupted` error either way; the
+   * signal lets handlers clean up (close handles, cancel side effects). */
   execute(
     args: Record<string, unknown>,
     callId: string,
     sessionName: string,
+    signal?: AbortSignal,
   ): Promise<ToolResultData | undefined>
 }
 
@@ -77,6 +81,10 @@ export interface ExtensionConfig {
     sessionName: string,
     payload?: unknown,
   ) => void | Promise<void>
+  /** Dedicated interrupt callback: called after in-flight awaits are
+   * aborted. When absent, interrupts fall back to onEventHook('interrupt').
+   */
+  onInterrupt?: (sessionName: string, reason?: string) => void | Promise<void>
   /**
    * Session lifecycle callback. On "deleted" the SDK also deletes the
    * session-scoped variables (KV) before calling this.
@@ -98,6 +106,7 @@ export interface ExtensionConfig {
 export class Extension {
   readonly manifest: ExtensionManifest
   private unsubs: Array<() => void> = []
+  private presenceTimer: ReturnType<typeof setInterval> | undefined
   // In-flight tool calls per session (AbortController per call), so an
   // interrupt signal aborts that session's awaits (real cancel semantics:
   // JS cannot kill the running handler, but the call resolves immediately).
@@ -168,6 +177,7 @@ export class Extension {
   }
 
   async serve(): Promise<void> {
+    this.startPresence()
     await this.subscribeDiscovery()
     await this.subscribeConfig()
     await this.subscribeTools()
@@ -194,22 +204,20 @@ export class Extension {
 
   private async subscribeConfig(): Promise<void> {
     if (this.cfg.config === undefined) return
-    // Pull the startup snapshot first (pre-serve changes), then subscribe.
+    // Recover state from the cfg KV bucket (0.2): the watch delivers the
+    // snapshot at startup and live updates afterwards — no agent needs to
+    // be online. Live sets still arrive (and may be rejected) via the req.
     try {
-      const reply = await this.bus.request(CH.configGet(this.cfg.id), {})
-      const parsed = ConfigSnapshotSchema.safeParse(reply.payload)
-      if (parsed.success) {
-        for (const [name, value] of Object.entries(parsed.data.global)) {
-          this.globalConfig.set(name, value)
-        }
-        for (const [sess, vals] of Object.entries(parsed.data.sessions)) {
-          const m = this.sessionConfig.get(sess) ?? new Map()
-          for (const [name, value] of Object.entries(vals)) m.set(name, value)
-          this.sessionConfig.set(sess, m)
-        }
-      }
+      const { stream, stop } = await this.bus.kvWatch(
+        CONFIG_BUCKET,
+        `${this.cfg.id}.>`,
+      )
+      this.unsubs.push(() => void stop())
+      void (async () => {
+        for await (const ev of stream) this.applyConfigKV(ev)
+      })()
     } catch {
-      // No authority serving snapshots yet; defaults apply.
+      // Bucket missing yet — defaults apply until the first set.
     }
     const sub = await this.bus.subscribe(CH.config(this.cfg.id))
     this.unsubs.push(() => void sub.close())
@@ -258,6 +266,27 @@ export class Extension {
         }
       }
     })()
+  }
+
+  /** Liveness heartbeat: manifest into the abc-presence KV bucket with a
+   * TTL, refreshed every interval. Agents watching presence see extensions
+   * arrive and (via TTL) disappear. */
+  startPresence(): void {
+    const put = () =>
+      void this.bus
+        .kvPut(
+          PRESENCE_BUCKET,
+          this.cfg.id,
+          JSON.stringify(this.manifest),
+          PRESENCE_TTL_MS,
+        )
+        .catch(() => {})
+    put()
+    this.presenceTimer = setInterval(put, 5000)
+    this.unsubs.push(() => {
+      if (this.presenceTimer !== undefined) clearInterval(this.presenceTimer)
+      void this.bus.kvDelete(PRESENCE_BUCKET, this.cfg.id).catch(() => {})
+    })
   }
 
   async close(): Promise<void> {
@@ -344,7 +373,12 @@ export class Extension {
           })
           try {
             const result = await Promise.race([
-              spec.execute(p.arguments ?? {}, p.call_id, sessionName),
+              spec.execute(
+                p.arguments ?? {},
+                p.call_id,
+                sessionName,
+                ac.signal,
+              ),
               aborted,
             ])
             settled = true
@@ -476,6 +510,39 @@ export class Extension {
     }
   }
 
+  /** Apply a cfg-bucket watch entry. Key layout: <extId>.<name> (global)
+   * or <extId>.<session>.<name> (session). Envelope {r,v} with a
+   * bare-value fallback for pre-0.2 entries. */
+  private applyConfigKV(ev: KvEvent): void {
+    const rest = ev.key.slice(this.cfg.id.length + 1)
+    const parts = rest.split('.').filter(p => p !== '')
+    const [p0, p1] = parts
+    if (p0 === undefined) return
+    if (ev.deleted) {
+      if (parts.length === 1) this.globalConfig.delete(p0)
+      else if (p1 !== undefined) this.sessionConfig.get(p0)?.delete(p1)
+      return
+    }
+    let v: unknown
+    try {
+      const parsed = JSON.parse(ev.value) as { r?: number; v?: unknown }
+      if (parsed !== null && typeof parsed === 'object' && 'v' in parsed) {
+        v = parsed.v
+      } else {
+        v = parsed
+      }
+    } catch {
+      return
+    }
+    if (v === undefined || v === null) return
+    if (parts.length === 1) this.globalConfig.set(p0, v)
+    else if (p1 !== undefined) {
+      const m = this.sessionConfig.get(p0) ?? new Map()
+      m.set(p1, v)
+      this.sessionConfig.set(p0, m)
+    }
+  }
+
   private async subscribeInterrupt() {
     const sub = await this.bus.subscribe(CH.interrupt(this.cfg.id), {
       queue: this.cfg.id,
@@ -489,7 +556,9 @@ export class Extension {
         // Abort in-flight awaits first: session-scoped signal cancels that
         // session only; a signal without a session is a broadcast.
         this.abortInflight(sessionName === '' ? undefined : sessionName)
-        if (this.cfg.onEventHook !== undefined) {
+        if (this.cfg.onInterrupt !== undefined) {
+          await this.cfg.onInterrupt(sessionName, sig?.reason)
+        } else if (this.cfg.onEventHook !== undefined) {
           await this.cfg.onEventHook('interrupt', sessionName, sig?.reason)
         }
       }
@@ -617,3 +686,11 @@ export function setSessionVariable(
 }
 
 // trackInflight registers a call's AbortController under its session.
+
+// CONFIG_BUCKET is the cfg KV bucket name (source of truth for config).
+const CONFIG_BUCKET = 'cfg'
+
+/** Presence bucket: key = extId, value = manifest, TTL refreshed by the
+ * extension heartbeat (extension/index.ts). */
+export const PRESENCE_BUCKET = 'abc-presence'
+export const PRESENCE_TTL_MS = 15_000

@@ -134,12 +134,18 @@ export async function start(opts: ServerConfig = {}): Promise<Server> {
     try {
       const nc = await connect({ servers: url })
       const jsm = await jetstreamManager(nc)
-      await jsm.streams.add({
-        name: 'ABC_MAILBOX',
-        subjects: ['abc.mailbox.>', 'abc.session.events.>'],
-        max_age: 24 * 3600 * 1_000_000_000,
-        storage: 'memory',
-      })
+      for (const s of [
+        { name: 'ABC_MAILBOX', subjects: ['abc.mailbox.>'] },
+        { name: 'ABC_EVENTS', subjects: ['abc.session.events.>'] },
+        { name: 'ABC_DLQ', subjects: ['abc.dlq.>'] },
+      ]) {
+        await jsm.streams.add({
+          name: s.name,
+          subjects: s.subjects,
+          max_age: 24 * 3600 * 1_000_000_000,
+          storage: 'memory',
+        })
+      }
       await nc.close()
     } catch {
       // Pre-creation is an optimization; lazy creation still works.
