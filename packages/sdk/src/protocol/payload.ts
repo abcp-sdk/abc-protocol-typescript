@@ -123,6 +123,14 @@ export type ExtensionVariableValue = z.infer<
 export const HooksSchema = z.object({
   call: z.array(z.string()).optional(),
   event: z.array(z.string()).optional(),
+  /** Per-hook JSON schema (subset) for call-hook argument payloads. */
+  call_schemas: z
+    .record(z.string(), z.record(z.string(), z.unknown()))
+    .optional(),
+  /** Per-hook JSON schema (subset) for event-hook payloads. */
+  event_schemas: z
+    .record(z.string(), z.record(z.string(), z.unknown()))
+    .optional(),
 })
 export type Hooks = z.infer<typeof HooksSchema>
 

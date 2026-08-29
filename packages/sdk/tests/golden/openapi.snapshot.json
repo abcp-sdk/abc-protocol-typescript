@@ -301,6 +301,20 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "call_schemas": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {}
+                }
+              },
+              "event_schemas": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {}
+                }
               }
             }
           },

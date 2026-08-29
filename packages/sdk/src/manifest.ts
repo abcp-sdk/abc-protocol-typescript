@@ -28,6 +28,12 @@ const ManifestSchema = z.object({
     .object({
       call: z.array(z.string()).optional(),
       event: z.array(z.string()).optional(),
+      call_schemas: z
+        .record(z.string(), z.record(z.string(), z.unknown()))
+        .optional(),
+      event_schemas: z
+        .record(z.string(), z.record(z.string(), z.unknown()))
+        .optional(),
     })
     .optional(),
 })
@@ -48,7 +54,14 @@ export interface Manifest {
   hooks?: {
     call?: string[]
     event?: string[]
+    call_schemas?: Record<string, Record<string, unknown>>
+    event_schemas?: Record<string, Record<string, unknown>>
   }
+}
+
+export interface HookSchema {
+  call?: Record<string, Record<string, unknown>>
+  event?: Record<string, Record<string, unknown>>
 }
 
 export function parseManifest(yaml: string): Manifest {
@@ -99,6 +112,20 @@ export function manifestConfig(
   }
   if (manifest.hooks?.call !== undefined) cfg.callHooks = manifest.hooks.call
   if (manifest.hooks?.event !== undefined) cfg.eventHooks = manifest.hooks.event
+  if (
+    manifest.hooks?.call_schemas !== undefined ||
+    manifest.hooks?.event_schemas !== undefined
+  ) {
+    const hookSchemas: {
+      call?: Record<string, Record<string, unknown>>
+      event?: Record<string, Record<string, unknown>>
+    } = {}
+    if (manifest.hooks?.call_schemas !== undefined)
+      hookSchemas.call = manifest.hooks.call_schemas
+    if (manifest.hooks?.event_schemas !== undefined)
+      hookSchemas.event = manifest.hooks.event_schemas
+    cfg.hookSchemas = hookSchemas
+  }
   if (opts.onCallHook !== undefined) cfg.onCallHook = opts.onCallHook
   if (opts.onEventHook !== undefined) cfg.onEventHook = opts.onEventHook
   return cfg

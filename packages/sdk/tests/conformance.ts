@@ -851,6 +851,59 @@ export function runConformance(name: string, newPair: Factory): void {
       await cleanup()
     })
 
+    it('validates hook payloads against declared schemas', async () => {
+      const { agentBus, extensionBus, cleanup } = await newPair()
+      const delivered: string[] = []
+      const ext = new Extension(extensionBus, {
+        id: 'conf-ext',
+        version: '1.0',
+        callHooks: ['audit'],
+        eventHooks: ['notice'],
+        hookSchemas: {
+          call: {
+            audit: {
+              type: 'object',
+              required: ['who'],
+              properties: { who: { type: 'string' } },
+            },
+          },
+          event: {
+            notice: {
+              type: 'object',
+              required: ['kind'],
+              properties: { kind: { type: 'string' } },
+            },
+          },
+        },
+        onCallHook: async (_h, _s, _args) => ({ ok: true }),
+        onEventHook: (_h, _s, _p) => {
+          delivered.push('yes')
+        },
+      })
+      await ext.serve()
+      const a = new Agent(agentBus)
+      // bad call args -> in-band invalid_argument
+      const res = await a.callHook('sess-h', 'conf-ext', 'audit', {
+        nope: true,
+      })
+      if (res.ok || res.error?.code !== 'invalid_argument') {
+        throw new Error('bad call args accepted: ' + JSON.stringify(res))
+      }
+      // bad event payload -> dropped
+      await a.publishEventHook('sess-h', 'notice', { unknown: 1 })
+      await sleep(300)
+      if (delivered.length !== 0)
+        throw new Error('invalid event payload delivered')
+      // valid payloads flow
+      await a.publishEventHook('sess-h', 'notice', { kind: 'ok' })
+      const deadline = Date.now() + 500
+      while (delivered.length === 0 && Date.now() < deadline) await sleep(100)
+      if (delivered.length === 0)
+        throw new Error('valid event payload not delivered')
+      await ext.close()
+      await cleanup()
+    })
+
     it('lets extensions publish into the session mailbox', async () => {
       const { agentBus, extensionBus, cleanup } = await newPair()
       const ext = new Extension(extensionBus, {

@@ -18,6 +18,7 @@ import {
   ToolCallEnvelopeSchema,
   type ToolResult,
 } from '../protocol/index.js'
+import { validateJsonSchema } from '../protocol/jsonschema.js'
 import { unescapeKVSegment } from '../protocol/kv-escaping.js'
 import { connectBus, type ExtensionConnect } from '../transport/index.js'
 
@@ -68,6 +69,12 @@ export interface ExtensionConfig {
   config?: Record<string, ConfigSpec>
   callHooks?: string[]
   eventHooks?: string[]
+  /** Per-hook JSON-schema (subset) for the hook payloads; the extension
+   * validates incoming payloads against these before dispatch. */
+  hookSchemas?: {
+    call?: Record<string, Record<string, unknown>>
+    event?: Record<string, Record<string, unknown>>
+  }
   /** Session lifecycle kinds this extension reacts to. */
   lifecycle?: Array<'created' | 'forked' | 'renamed' | 'deleted'>
   /** Sync call-hook (req); returning an error aborts the enclosing op. */
@@ -442,9 +449,18 @@ export class Extension {
           const parsed = HookCallSchema.safeParse(env.payload)
           const p = parsed.success ? parsed.data : undefined
           const sessionName = p?.session_name ?? env.session_name ?? ''
+          const badArgs = validateJsonSchema(
+            this.cfg.hookSchemas?.call?.[hook],
+            p?.arguments,
+          )
           const handler = this.cfg.onCallHook
           let res: { ok: boolean; error?: ErrorPayload; data?: unknown }
-          if (handler === undefined) {
+          if (badArgs !== null) {
+            res = {
+              ok: false,
+              error: { code: 'invalid_argument', message: badArgs },
+            }
+          } else if (handler === undefined) {
             res = {
               ok: false,
               error: {
@@ -479,6 +495,11 @@ export class Extension {
           const parsed = HookEventSchema.safeParse(env.payload)
           const ev = parsed.success ? parsed.data : undefined
           const sessionName = ev?.session_name ?? env.session_name ?? ''
+          const bad = validateJsonSchema(
+            this.cfg.hookSchemas?.event?.[hook],
+            ev?.payload,
+          )
+          if (bad !== null) continue // invalid event payload: drop (best-effort)
           if (this.cfg.onEventHook !== undefined) {
             await this.cfg.onEventHook(hook, sessionName, ev?.payload)
           }
