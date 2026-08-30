@@ -44,8 +44,10 @@ export function verify(
   provided: string,
 ): boolean {
   const want = sign({ id: claimedId, secret }, fields)
+  // Compare the base64url strings as bytes (both sides encode the same way;
+  // decoding only one side would compare UTF-8 text with raw HMAC bytes).
   const a = Buffer.from(want)
-  const b = Buffer.from(provided, 'base64url')
+  const b = Buffer.from(provided)
   return a.length === b.length && timingSafeEqual(a, b)
 }
 

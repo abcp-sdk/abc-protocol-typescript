@@ -28,6 +28,12 @@ export type EnvelopeKind = z.infer<typeof EnvelopeKindSchema>
  */
 export const EnvelopeSchema = z.object({
   v: z.number().int().default(1),
+  /**
+   * @deprecated Informational copy of the subject. The NATS subject is
+   * the authoritative routing truth; consumers MUST NOT dispatch on this
+   * field. SDKs populate it from the subject on decode (not from the
+   * wire). Planned for removal in v1.1 (senders will stop writing it).
+   */
   ch: z.string(),
   kind: EnvelopeKindSchema,
   id: z.string().optional(),

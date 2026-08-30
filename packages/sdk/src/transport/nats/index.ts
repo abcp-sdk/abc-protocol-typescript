@@ -4,9 +4,11 @@ import {
   jetstreamManager,
 } from '@nats-io/jetstream'
 import { Kvm } from '@nats-io/kv'
-import type {
-  NatsConnection,
-  Subscription as NatsSub,
+import {
+  headers,
+  type MsgHdrs,
+  type NatsConnection,
+  type Subscription as NatsSub,
 } from '@nats-io/nats-core'
 import { Objm } from '@nats-io/obj'
 import { connect } from '@nats-io/transport-node'
@@ -21,6 +23,7 @@ import type {
   SubscribeOpts,
   Subscription,
 } from '../../bus/index.js'
+import { authHeader, type Identity, verify } from '../../identity.js'
 import { EnvelopeSchema, sessionToken } from '../../protocol/index.js'
 
 const STREAM_MAILBOX = 'ABC_MAILBOX'
@@ -52,6 +55,10 @@ export interface NatsConnectOptions {
   /** JetStream replica count at stream creation; 0 = server default (1).
    * Cannot change after creation. */
   replicas?: number
+  /** Opt-in message authentication: outgoing messages carry abc-id/abc-sig
+   * NATS headers (HMAC), incoming messages are verified. Undefined
+   * (default) = zero auth overhead, everything passes. */
+  identity?: Identity
 }
 
 function sameSubjects(a: string[] | undefined, b: string[]): boolean {
@@ -157,7 +164,56 @@ function buildEnvelope(
 }
 
 export class NatsBus implements Bus {
-  constructor(private readonly nc: NatsConnection) {}
+  constructor(
+    private readonly nc: NatsConnection,
+    private readonly idn?: Identity,
+  ) {}
+
+  private signMsg(
+    msg: { subject: string; data: Uint8Array; headers?: MsgHdrs },
+    kind: string,
+    id: string,
+  ): void {
+    if (this.idn === undefined) return
+    const parsed = JSON.parse(Buffer.from(msg.data).toString('utf8')) as {
+      payload?: unknown
+    }
+    const h = authHeader(this.idn, {
+      ch: msg.subject,
+      kind,
+      id,
+      payload: parsed.payload,
+    })
+    if (msg.headers === undefined) msg.headers = headers()
+    msg.headers.set('abc-id', h['abc-id'])
+    msg.headers.set('abc-sig', h['abc-sig'])
+  }
+
+  verifyMsg(m: {
+    data: Uint8Array
+    subject: string
+    headers?: MsgHdrs
+  }): boolean {
+    if (this.idn === undefined) return true
+    const sig = m.headers?.get('abc-sig')
+    if (sig === undefined || sig === '') return false
+    const raw = JSON.parse(Buffer.from(m.data).toString('utf8')) as {
+      kind?: string
+      id?: string
+      payload?: unknown
+    }
+    return verify(
+      m.headers?.get('abc-id') ?? '',
+      this.idn.secret,
+      {
+        ch: m.subject,
+        kind: raw.kind ?? '',
+        id: raw.id ?? '',
+        payload: raw.payload,
+      },
+      sig,
+    )
+  }
 
   async request(
     ch: string,
@@ -171,7 +227,19 @@ export class NatsBus implements Bus {
     // it" — the ceiling here only guards a stuck request (nats.js would
     // otherwise apply its own short default).
     const t = opts.timeoutMs && opts.timeoutMs > 0 ? opts.timeoutMs : 600_000
-    const m = await this.nc.request(ch, wire, { timeout: t })
+    const reqOpts: { timeout: number; headers?: MsgHdrs } = { timeout: t }
+    if (this.idn !== undefined) {
+      const msg: { subject: string; data: Uint8Array; headers?: MsgHdrs } = {
+        subject: ch,
+        data: wire,
+      }
+      this.signMsg(msg, 'req', '')
+      if (msg.headers !== undefined) reqOpts.headers = msg.headers
+    }
+    const m = await this.nc.request(ch, wire, reqOpts)
+    if (this.idn !== undefined && !this.verifyMsg(m)) {
+      throw new Error(`identity: signature verification failed on ${ch}`)
+    }
     const env = decode(m)
     if (env === null) throw new Error(`invalid envelope from ${ch}`)
     return env
@@ -199,11 +267,24 @@ export class NatsBus implements Bus {
   }
 
   async publish(ch: string, payload: unknown, replyTo?: string): Promise<void> {
-    this.nc.publish(
-      ch,
-      encode({ v: 1, ch, kind: 'pub', payload }),
-      replyTo === undefined ? {} : { reply: replyTo },
-    )
+    const data = buildEnvelope('pub', ch, payload, { replyTo })
+    if (this.idn !== undefined) {
+      const msg: { subject: string; data: Uint8Array; headers?: MsgHdrs } = {
+        subject: ch,
+        data,
+      }
+      this.signMsg(msg, 'pub', '')
+      const pubOpts: { reply?: string; headers?: MsgHdrs } = {}
+      if (replyTo !== undefined) pubOpts.reply = replyTo
+      if (msg.headers !== undefined) pubOpts.headers = msg.headers
+      await this.nc.publish(ch, data, pubOpts)
+    } else {
+      await this.nc.publish(
+        ch,
+        data,
+        replyTo === undefined ? {} : { reply: replyTo },
+      )
+    }
   }
 
   async subscribe(ch: string, opts?: SubscribeOpts): Promise<Subscription> {
@@ -211,9 +292,10 @@ export class NatsBus implements Bus {
       opts?.queue !== undefined
         ? this.nc.subscribe(ch, { queue: opts.queue })
         : this.nc.subscribe(ch)
+    const bus = this
     return {
       [Symbol.asyncIterator]() {
-        return decodeIter(sub)
+        return decodeIter(sub, bus)
       },
       async close() {
         sub.unsubscribe()
@@ -426,8 +508,12 @@ export class NatsBus implements Bus {
   }
 }
 
-async function* decodeIter(sub: NatsSub): AsyncGenerator<Envelope> {
+async function* decodeIter(
+  sub: NatsSub,
+  bus?: NatsBus,
+): AsyncGenerator<Envelope> {
   for await (const m of sub) {
+    if (bus !== undefined && !bus.verifyMsg(m)) continue // bad sig: drop
     const env = decode(m)
     if (env === null) continue
     if (m.reply !== '') env.reply_to = m.reply
@@ -466,7 +552,7 @@ export async function connectNatsBus(
   const servers = url ?? process.env.NATS_URL ?? 'nats://127.0.0.1:4222'
   const nc = await connect({ servers })
   await ensureStreams(nc, opts)
-  return new NatsBus(nc)
+  return new NatsBus(nc, opts.identity)
 }
 
 /**
