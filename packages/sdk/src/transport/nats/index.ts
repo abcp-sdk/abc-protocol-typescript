@@ -118,14 +118,42 @@ async function ensureStreams(
 }
 
 function decode(m: { data: Uint8Array }): Envelope | null {
-  const parsed = EnvelopeSchema.safeParse(
-    JSON.parse(Buffer.from(m.data).toString('utf8')),
-  )
+  const raw = JSON.parse(Buffer.from(m.data).toString('utf8')) as Record<
+    string,
+    unknown
+  >
+  if (raw.v !== undefined && raw.v !== 1) {
+    console.warn(
+      `[abc] envelope version ${String(raw.v)} on ${String(raw.ch)} (this build speaks v1); fields may be misinterpreted`,
+    )
+  }
+  const parsed = EnvelopeSchema.safeParse(raw)
   return parsed.success ? parsed.data : null
 }
 
 function encode(payload: unknown): Buffer {
   return Buffer.from(JSON.stringify(payload))
+}
+
+// buildEnvelope assembles the wire envelope in one place. The optional
+// fields ride only when set, mirroring the zod optional() semantics.
+function buildEnvelope(
+  kind: string,
+  ch: string,
+  payload: unknown,
+  opts: {
+    id?: string | undefined
+    sessionName?: string | undefined
+    replyTo?: string | undefined
+  } = {},
+): Buffer {
+  const body: Record<string, unknown> = { v: 1, ch, kind, payload }
+  if (opts.id !== undefined && opts.id !== '') body.id = opts.id
+  if (opts.sessionName !== undefined && opts.sessionName !== '')
+    body.session_name = opts.sessionName
+  if (opts.replyTo !== undefined && opts.replyTo !== '')
+    body.reply_to = opts.replyTo
+  return encode(body)
 }
 
 export class NatsBus implements Bus {
@@ -136,13 +164,14 @@ export class NatsBus implements Bus {
     payload: unknown,
     opts: RequestOpts = {},
   ): Promise<Envelope> {
-    const body: Record<string, unknown> = { v: 1, ch, kind: 'req', payload }
-    if (opts.sessionName !== undefined) body.session_name = opts.sessionName
+    const wire = buildEnvelope('req', ch, payload, {
+      sessionName: opts.sessionName,
+    })
     // timeoutMs > 0 bounds the request; 0/unset means "application bounds
     // it" — the ceiling here only guards a stuck request (nats.js would
     // otherwise apply its own short default).
     const t = opts.timeoutMs && opts.timeoutMs > 0 ? opts.timeoutMs : 600_000
-    const m = await this.nc.request(ch, encode(body), { timeout: t })
+    const m = await this.nc.request(ch, wire, { timeout: t })
     const env = decode(m)
     if (env === null) throw new Error(`invalid envelope from ${ch}`)
     return env
@@ -198,15 +227,11 @@ export class NatsBus implements Bus {
     opts: InboxPublishOpts,
   ): Promise<void> {
     const js = jetstream(this.nc)
-    const body: Record<string, unknown> = {
-      v: 1,
-      ch,
-      kind: 'queue',
+    const wire = buildEnvelope('queue', ch, payload, {
       id: opts.id,
-      payload,
-    }
-    if (opts.sessionName !== undefined) body.session_name = opts.sessionName
-    await js.publish(ch, encode(body), { msgID: opts.id })
+      sessionName: opts.sessionName,
+    })
+    await js.publish(ch, wire, { msgID: opts.id })
   }
 
   async inboxConsume(opts?: InboxConsumeOpts): Promise<InboxSubscription> {

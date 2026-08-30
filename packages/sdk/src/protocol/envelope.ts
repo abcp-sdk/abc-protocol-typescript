@@ -4,7 +4,7 @@ import { z } from '../zod.js'
  * ABC — Agent Bus Communication Protocol.
  *
  * Wire contract between an **agent** and **extension servers**. Three message
- * primitives ride every transport (inproc / nats / ws):
+ * primitives ride the single transport (NATS + JetStream):
  *
  *   - `req`   — ask one (or many) and await the answer(s); the transport
  *               manages the reply address internally.
