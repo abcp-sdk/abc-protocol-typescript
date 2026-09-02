@@ -33,6 +33,7 @@ const INBOX_WILDCARD = 'abc.mailbox.>'
 const EVENTS_PREFIX = 'abc.session.events.'
 const DLQ_PREFIX = 'abc.dlq.'
 const OBJECT_BUCKET = 'ABC_TOOL'
+const OBJECT_BUCKET_PERSISTENT = 'ABC_FILES'
 
 // Two streams, two consumption models: the mailbox is a work queue
 // (competing consumers, ack on done), session events are a replayable
@@ -360,6 +361,20 @@ export class NatsBus implements Bus {
   async objectGet(name: string): Promise<Uint8Array | null> {
     try {
       const os = await new Objm(this.nc).open(OBJECT_BUCKET)
+      return await os.getBlob(name)
+    } catch {
+      return null
+    }
+  }
+
+  async objectPutPersistent(name: string, data: Uint8Array): Promise<void> {
+    const os = await new Objm(this.nc).create(OBJECT_BUCKET_PERSISTENT, {})
+    await os.putBlob({ name }, data)
+  }
+
+  async objectGetPersistent(name: string): Promise<Uint8Array | null> {
+    try {
+      const os = await new Objm(this.nc).open(OBJECT_BUCKET_PERSISTENT)
       return await os.getBlob(name)
     } catch {
       return null

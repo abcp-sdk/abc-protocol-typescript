@@ -107,6 +107,16 @@ export interface Bus {
   /** Fetch an object; null when absent. */
   objectGet(name: string): Promise<Uint8Array | null>
 
+  /**
+   * Store an object in the persistent (no-TTL) bucket. Tool payloads use
+   * `objectPut` (transient, 24h); durable file bytes use this so they are
+   * never expired.
+   */
+  objectPutPersistent(name: string, data: Uint8Array): Promise<void>
+
+  /** Fetch an object from the persistent (no-TTL) bucket. */
+  objectGetPersistent(name: string): Promise<Uint8Array | null>
+
   /** Atomic create (fails if the key exists); returns the revision. */
   kvCreate(
     bucket: string,
