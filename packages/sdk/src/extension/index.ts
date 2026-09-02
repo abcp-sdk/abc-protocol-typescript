@@ -26,6 +26,8 @@ const OFFLOAD_THRESHOLD = 256 * 1024
 
 export interface ToolSpec {
   description: string
+  /** Localized descriptions (locale → text); `description` is the fallback. */
+  descriptions?: Record<string, string>
   inputSchema?: Record<string, unknown>
   /** Optional 4th parameter: aborted when this call is interrupted. The
    * await resolves immediately with an `interrupted` error either way; the
@@ -46,6 +48,7 @@ export type ToolResultData = {
 
 export interface VariableSpec {
   description?: string
+  descriptions?: Record<string, string>
   scope?: 'global' | 'session'
   resolve?: (sessionName?: string) => Promise<string> | string
 }
@@ -139,6 +142,9 @@ export class Extension {
       .map(([name, t]) => ({
         name,
         description: t.description,
+        ...(t.descriptions !== undefined
+          ? { descriptions: t.descriptions }
+          : {}),
         input_schema: t.inputSchema,
       }))
       .sort((a, b) => a.name.localeCompare(b.name))
@@ -146,6 +152,9 @@ export class Extension {
       .map(([name, v]) => ({
         name,
         description: v.description,
+        ...(v.descriptions !== undefined
+          ? { descriptions: v.descriptions }
+          : {}),
         scope: v.scope ?? 'global',
       }))
       .sort((a, b) => a.name.localeCompare(b.name))

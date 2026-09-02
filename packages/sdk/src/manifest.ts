@@ -44,11 +44,13 @@ export interface Manifest {
   tools: Array<{
     name: string
     description: string
+    descriptions?: Record<string, string>
     input_schema?: Record<string, unknown>
   }>
   variables: Array<{
     name: string
     description?: string
+    descriptions?: Record<string, string>
     scope: 'global' | 'session'
   }>
   hooks?: {

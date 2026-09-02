@@ -98,6 +98,9 @@ export type MailboxMessage = z.infer<typeof MailboxMessageSchema>
 export const ExtensionToolSchema = z.object({
   name: z.string(),
   description: z.string(),
+  // Localized tool descriptions (locale → text). `description` is the default
+  // (usually English) fallback; `descriptions` is optional and arbitrary-locale.
+  descriptions: z.record(z.string(), z.string()).optional(),
   input_schema: z
     .record(z.string(), z.unknown())
     .openapi({ description: 'JSON Schema describing tool input.' })
@@ -108,6 +111,7 @@ export type ExtensionTool = z.infer<typeof ExtensionToolSchema>
 export const ExtensionVariableSchema = z.object({
   name: z.string(),
   description: z.string().optional(),
+  descriptions: z.record(z.string(), z.string()).optional(),
   scope: z.enum(['global', 'session']).default('global'),
 })
 export type ExtensionVariable = z.infer<typeof ExtensionVariableSchema>
