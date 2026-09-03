@@ -19,7 +19,11 @@
           },
           "kind": {
             "type": "string",
-            "enum": ["req", "pub", "queue"]
+            "enum": [
+              "req",
+              "pub",
+              "queue"
+            ]
           },
           "id": {
             "type": "string"
@@ -34,7 +38,10 @@
             "description": "Opaque business body."
           }
         },
-        "required": ["ch", "kind"]
+        "required": [
+          "ch",
+          "kind"
+        ]
       },
       "ErrorPayload": {
         "type": "object",
@@ -54,7 +61,10 @@
             "type": "string"
           }
         },
-        "required": ["code", "message"]
+        "required": [
+          "code",
+          "message"
+        ]
       },
       "ObjectRef": {
         "type": "object",
@@ -66,7 +76,9 @@
             "type": "string"
           }
         },
-        "required": ["id"]
+        "required": [
+          "id"
+        ]
       },
       "ToolCallEnvelope": {
         "type": "object",
@@ -80,7 +92,10 @@
             "description": "Arbitrary key/value tool arguments."
           }
         },
-        "required": ["call_id", "arguments"]
+        "required": [
+          "call_id",
+          "arguments"
+        ]
       },
       "ToolResult": {
         "type": "object",
@@ -107,7 +122,9 @@
                 "type": "string"
               }
             },
-            "required": ["id"]
+            "required": [
+              "id"
+            ]
           },
           "error": {
             "type": "object",
@@ -127,13 +144,19 @@
                 "type": "string"
               }
             },
-            "required": ["code", "message"]
+            "required": [
+              "code",
+              "message"
+            ]
           },
           "metadata": {
             "description": "Opaque metadata."
           }
         },
-        "required": ["call_id", "tool"]
+        "required": [
+          "call_id",
+          "tool"
+        ]
       },
       "ToolProgress": {
         "type": "object",
@@ -156,7 +179,9 @@
             "description": "Opaque UI metadata."
           }
         },
-        "required": ["call_id"]
+        "required": [
+          "call_id"
+        ]
       },
       "MailboxMessage": {
         "type": "object",
@@ -171,7 +196,10 @@
             "description": "Opaque message body."
           }
         },
-        "required": ["id", "type"]
+        "required": [
+          "id",
+          "type"
+        ]
       },
       "ExtensionTool": {
         "type": "object",
@@ -182,13 +210,22 @@
           "description": {
             "type": "string"
           },
+          "descriptions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
           "input_schema": {
             "type": "object",
             "additionalProperties": {},
             "description": "JSON Schema describing tool input."
           }
         },
-        "required": ["name", "description"]
+        "required": [
+          "name",
+          "description"
+        ]
       },
       "ExtensionVariable": {
         "type": "object",
@@ -199,13 +236,24 @@
           "description": {
             "type": "string"
           },
+          "descriptions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
           "scope": {
             "type": "string",
-            "enum": ["global", "session"],
+            "enum": [
+              "global",
+              "session"
+            ],
             "default": "global"
           }
         },
-        "required": ["name"]
+        "required": [
+          "name"
+        ]
       },
       "ExtensionVariableValue": {
         "type": "object",
@@ -217,7 +265,10 @@
             "type": "string"
           }
         },
-        "required": ["name", "value"]
+        "required": [
+          "name",
+          "value"
+        ]
       },
       "ExtensionManifest": {
         "type": "object",
@@ -232,7 +283,10 @@
             "type": "array",
             "items": {
               "type": "string",
-              "enum": ["tools", "prompt"]
+              "enum": [
+                "tools",
+                "prompt"
+              ]
             },
             "default": []
           },
@@ -253,13 +307,22 @@
                 "description": {
                   "type": "string"
                 },
+                "descriptions": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
                 "input_schema": {
                   "type": "object",
                   "additionalProperties": {},
                   "description": "JSON Schema describing tool input."
                 }
               },
-              "required": ["name", "description"]
+              "required": [
+                "name",
+                "description"
+              ]
             }
           },
           "prompt": {
@@ -276,13 +339,24 @@
                     "description": {
                       "type": "string"
                     },
+                    "descriptions": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
                     "scope": {
                       "type": "string",
-                      "enum": ["global", "session"],
+                      "enum": [
+                        "global",
+                        "session"
+                      ],
                       "default": "global"
                     }
                   },
-                  "required": ["name"]
+                  "required": [
+                    "name"
+                  ]
                 }
               }
             }
@@ -328,7 +402,13 @@
                 },
                 "type": {
                   "type": "string",
-                  "enum": ["string", "number", "boolean", "enum", "json"]
+                  "enum": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "enum",
+                    "json"
+                  ]
                 },
                 "enum_values": {
                   "type": "array",
@@ -344,22 +424,36 @@
                 },
                 "scope": {
                   "type": "string",
-                  "enum": ["global", "session"],
+                  "enum": [
+                    "global",
+                    "session"
+                  ],
                   "default": "global"
                 }
               },
-              "required": ["name", "type"]
+              "required": [
+                "name",
+                "type"
+              ]
             }
           },
           "lifecycle": {
             "type": "array",
             "items": {
               "type": "string",
-              "enum": ["created", "forked", "renamed", "deleted"]
+              "enum": [
+                "created",
+                "forked",
+                "renamed",
+                "deleted"
+              ]
             }
           }
         },
-        "required": ["id", "version"]
+        "required": [
+          "id",
+          "version"
+        ]
       },
       "HookCall": {
         "type": "object",
@@ -376,7 +470,10 @@
             "description": "Arbitrary hook arguments."
           }
         },
-        "required": ["hook", "session_name"]
+        "required": [
+          "hook",
+          "session_name"
+        ]
       },
       "HookEvent": {
         "type": "object",
@@ -391,7 +488,10 @@
             "description": "Opaque event body."
           }
         },
-        "required": ["hook", "session_name"]
+        "required": [
+          "hook",
+          "session_name"
+        ]
       },
       "HookResponse": {
         "type": "object",
@@ -417,13 +517,18 @@
                 "type": "string"
               }
             },
-            "required": ["code", "message"]
+            "required": [
+              "code",
+              "message"
+            ]
           },
           "data": {
             "description": "Opaque hook result data."
           }
         },
-        "required": ["ok"]
+        "required": [
+          "ok"
+        ]
       },
       "InterruptSignal": {
         "type": "object",
@@ -444,7 +549,13 @@
           },
           "type": {
             "type": "string",
-            "enum": ["string", "number", "boolean", "enum", "json"]
+            "enum": [
+              "string",
+              "number",
+              "boolean",
+              "enum",
+              "json"
+            ]
           },
           "enum_values": {
             "type": "array",
@@ -460,11 +571,17 @@
           },
           "scope": {
             "type": "string",
-            "enum": ["global", "session"],
+            "enum": [
+              "global",
+              "session"
+            ],
             "default": "global"
           }
         },
-        "required": ["name", "type"]
+        "required": [
+          "name",
+          "type"
+        ]
       },
       "ConfigSet": {
         "type": "object",
@@ -480,7 +597,10 @@
           },
           "scope": {
             "type": "string",
-            "enum": ["global", "session"]
+            "enum": [
+              "global",
+              "session"
+            ]
           },
           "session_name": {
             "type": "string"
@@ -490,7 +610,11 @@
             "default": true
           }
         },
-        "required": ["name", "revision", "scope"]
+        "required": [
+          "name",
+          "revision",
+          "scope"
+        ]
       },
       "ConfigSnapshot": {
         "type": "object",
@@ -507,14 +631,22 @@
             }
           }
         },
-        "required": ["global", "sessions"]
+        "required": [
+          "global",
+          "sessions"
+        ]
       },
       "LifecycleEvent": {
         "type": "object",
         "properties": {
           "kind": {
             "type": "string",
-            "enum": ["created", "forked", "renamed", "deleted"]
+            "enum": [
+              "created",
+              "forked",
+              "renamed",
+              "deleted"
+            ]
           },
           "session_name": {
             "type": "string"
@@ -532,7 +664,10 @@
             "description": "Opaque kind-specific body."
           }
         },
-        "required": ["kind", "session_name"]
+        "required": [
+          "kind",
+          "session_name"
+        ]
       }
     },
     "parameters": {}

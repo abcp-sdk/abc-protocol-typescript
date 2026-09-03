@@ -38,6 +38,16 @@ const ManifestSchema = z.object({
     .optional(),
 })
 
+/**
+ * `input_schema` is an opaque JSON-Schema blob by design: arbitrary schema
+ * keywords flow through untouched. One convention is protocol-declared:
+ * any schema node (typically a property) may carry
+ * `descriptions: Record<locale, string>` next to its `description`, exactly
+ * like tool-level descriptions. Consumers resolve
+ * `descriptions[locale] → descriptions[primary] → description` and MUST
+ * strip the `descriptions` key before handing the schema to a model, so
+ * only standard JSON-Schema keys cross the model boundary.
+ */
 export interface Manifest {
   id: string
   version: string
