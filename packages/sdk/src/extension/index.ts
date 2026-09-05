@@ -29,6 +29,9 @@ export interface ToolSpec {
   /** Localized descriptions (locale → text); `description` is the fallback. */
   descriptions?: Record<string, string>
   inputSchema?: Record<string, unknown>
+  /** Config names whose value this tool requires to run (a tool may share a
+   * required config with sibling tools). Absent = no config is gated. */
+  requiredConfig?: string[]
   /** Optional 4th parameter: aborted when this call is interrupted. The
    * await resolves immediately with an `interrupted` error either way; the
    * signal lets handlers clean up (close handles, cancel side effects). */
@@ -146,6 +149,7 @@ export class Extension {
           ? { descriptions: t.descriptions }
           : {}),
         input_schema: t.inputSchema,
+        ...(t.requiredConfig !== undefined ? { required_config: t.requiredConfig } : {}),
       }))
       .sort((a, b) => a.name.localeCompare(b.name))
     const variables: ExtensionVariable[] = Object.entries(cfg.variables ?? {})

@@ -105,6 +105,8 @@ export const ExtensionToolSchema = z.object({
     .record(z.string(), z.unknown())
     .openapi({ description: 'JSON Schema describing tool input.' })
     .optional(),
+  /** Config names whose value this tool requires to run (may be shared). */
+  required_config: z.array(z.string()).optional(),
 })
 export type ExtensionTool = z.infer<typeof ExtensionToolSchema>
 

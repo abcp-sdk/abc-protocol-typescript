@@ -220,6 +220,12 @@
             "type": "object",
             "additionalProperties": {},
             "description": "JSON Schema describing tool input."
+          },
+          "required_config": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [
@@ -317,6 +323,12 @@
                   "type": "object",
                   "additionalProperties": {},
                   "description": "JSON Schema describing tool input."
+                },
+                "required_config": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
                 }
               },
               "required": [

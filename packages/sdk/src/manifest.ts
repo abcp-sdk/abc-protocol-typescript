@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { parse as parseYaml } from 'yaml'
 import type {
+  ConfigSpec,
   ExtensionConfig,
   ToolSpec,
   VariableSpec,
@@ -11,10 +12,21 @@ const ManifestToolSchema = z.object({
   name: z.string(),
   description: z.string(),
   input_schema: z.record(z.string(), z.unknown()).optional(),
+  /** Config names whose value this tool requires to run (may be shared). */
+  required_config: z.array(z.string()).optional(),
 })
 
 const ManifestVariableSchema = z.object({
   name: z.string(),
+  description: z.string().optional(),
+  scope: z.enum(['global', 'session']).default('global'),
+})
+
+const ManifestConfigSchema = z.object({
+  name: z.string(),
+  type: z.enum(['string', 'number', 'boolean', 'enum', 'json']),
+  enum_values: z.array(z.string()).optional(),
+  default: z.unknown().optional(),
   description: z.string().optional(),
   scope: z.enum(['global', 'session']).default('global'),
 })
@@ -56,12 +68,21 @@ export interface Manifest {
     description: string
     descriptions?: Record<string, string>
     input_schema?: Record<string, unknown>
+    required_config?: string[]
   }>
   variables: Array<{
     name: string
     description?: string
     descriptions?: Record<string, string>
     scope: 'global' | 'session'
+  }>
+  config?: Array<{
+    name: string
+    type: 'string' | 'number' | 'boolean' | 'enum' | 'json'
+    enum_values?: string[]
+    default?: unknown
+    description?: string
+    scope?: 'global' | 'session'
   }>
   hooks?: {
     call?: string[]
@@ -104,6 +125,7 @@ export function manifestConfig(
       execute: handler.execute,
     }
     if (t.input_schema !== undefined) spec.inputSchema = t.input_schema
+    if (t.required_config !== undefined) spec.requiredConfig = t.required_config
     tools[t.name] = spec
   }
 
@@ -121,6 +143,15 @@ export function manifestConfig(
     version: manifest.version,
     tools,
     variables,
+  }
+  for (const c of manifest.config ?? []) {
+    const spec: ConfigSpec = { type: c.type }
+    if (c.enum_values !== undefined) spec.enumValues = c.enum_values
+    if (c.default !== undefined) spec.default = c.default
+    if (c.description !== undefined) spec.description = c.description
+    if (c.scope !== undefined) spec.scope = c.scope
+    cfg.config = cfg.config ?? {}
+    cfg.config[c.name] = spec
   }
   if (manifest.hooks?.call !== undefined) cfg.callHooks = manifest.hooks.call
   if (manifest.hooks?.event !== undefined) cfg.eventHooks = manifest.hooks.event
