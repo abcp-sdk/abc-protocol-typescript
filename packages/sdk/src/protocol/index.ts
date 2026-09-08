@@ -1,4 +1,5 @@
 export * from './channels.js'
+export * from './file.js'
 export * from './envelope.js'
 export * from './error.js'
 export * from './payload.js'
