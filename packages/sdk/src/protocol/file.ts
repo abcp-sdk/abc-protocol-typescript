@@ -9,7 +9,7 @@
  */
 import type { Bus } from '../bus/index.js'
 
-export const FILE_META_BUCKET = 'files.meta'
+export const FILE_META_BUCKET = 'abc-files-meta'
 export const FILE_META_PREFIX = 'f.'
 export const FILE_SHA_PREFIX = 'sha.'
 
