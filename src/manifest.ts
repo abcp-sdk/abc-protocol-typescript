@@ -11,6 +11,7 @@ import { z } from './zod.js'
 const ManifestToolSchema = z.object({
   name: z.string(),
   description: z.string(),
+  descriptions: z.record(z.string(), z.string()).optional(),
   input_schema: z.record(z.string(), z.unknown()).optional(),
   /** Config names whose value this tool requires to run (may be shared). */
   required_config: z.array(z.string()).optional(),
@@ -28,6 +29,7 @@ const ManifestConfigSchema = z.object({
   enum_values: z.array(z.string()).optional(),
   default: z.unknown().optional(),
   description: z.string().optional(),
+  descriptions: z.record(z.string(), z.string()).optional(),
   scope: z.enum(['global', 'session']).default('global'),
 })
 
@@ -82,6 +84,7 @@ export interface Manifest {
     enum_values?: string[]
     default?: unknown
     description?: string
+    descriptions?: Record<string, string>
     scope?: 'global' | 'session'
   }>
   hooks?: {
@@ -124,6 +127,7 @@ export function manifestConfig(
       description: t.description,
       execute: handler.execute,
     }
+    if (t.descriptions !== undefined) spec.descriptions = t.descriptions
     if (t.input_schema !== undefined) spec.inputSchema = t.input_schema
     if (t.required_config !== undefined) spec.requiredConfig = t.required_config
     tools[t.name] = spec
@@ -149,6 +153,7 @@ export function manifestConfig(
     if (c.enum_values !== undefined) spec.enumValues = c.enum_values
     if (c.default !== undefined) spec.default = c.default
     if (c.description !== undefined) spec.description = c.description
+    if (c.descriptions !== undefined) spec.descriptions = c.descriptions
     if (c.scope !== undefined) spec.scope = c.scope
     cfg.config = cfg.config ?? {}
     cfg.config[c.name] = spec

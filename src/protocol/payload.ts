@@ -24,6 +24,9 @@ export const ExtensionConfigItemSchema = z.object({
     .openapi({ description: 'Default value when unset.' })
     .optional(),
   description: z.string().optional(),
+  // Localized config descriptions (locale → text); `description` is the
+  // default (usually English) fallback, same convention as tool descriptions.
+  descriptions: z.record(z.string(), z.string()).optional(),
   scope: z.enum(['global', 'session']).default('global'),
 })
 export type ExtensionConfigItem = z.infer<typeof ExtensionConfigItemSchema>

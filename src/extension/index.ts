@@ -58,6 +58,8 @@ export interface VariableSpec {
 
 export interface ConfigSpec {
   description?: string
+  /** Localized descriptions (locale → text); `description` is the fallback. */
+  descriptions?: Record<string, string>
   /** Value type validated agent-side; also the shape passed to the callback. */
   type: 'string' | 'number' | 'boolean' | 'enum' | 'json'
   /** Allowed values when type is enum. */
@@ -169,6 +171,7 @@ export class Extension {
         ...(c.enumValues !== undefined ? { enum_values: c.enumValues } : {}),
         ...(c.default !== undefined ? { default: c.default } : {}),
         ...(c.description !== undefined ? { description: c.description } : {}),
+        ...(c.descriptions !== undefined ? { descriptions: c.descriptions } : {}),
         scope: c.scope ?? 'global',
       }))
       .sort((a, b) => a.name.localeCompare(b.name))
