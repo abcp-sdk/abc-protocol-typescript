@@ -38,6 +38,8 @@ const ManifestSchema = z.object({
   version: z.string(),
   tools: z.array(ManifestToolSchema).optional(),
   variables: z.array(ManifestVariableSchema).optional(),
+  config: z.array(ManifestConfigSchema).optional(),
+  lifecycle: z.array(z.string()).optional(),
   hooks: z
     .object({
       call: z.array(z.string()).optional(),
