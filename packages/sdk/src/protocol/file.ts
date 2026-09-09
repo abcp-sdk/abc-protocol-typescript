@@ -122,15 +122,18 @@ function emptyMeta(code: string): FileMeta {
 }
 
 function encodeMeta(m: FileMeta): FileMetaJSON {
-  return {
+  const out: FileMetaJSON = {
     code: m.code,
     sha256: m.sha256,
     name: m.name,
     mime: m.mime,
     size: m.size,
-    uploader_session: m.uploaderSession,
     createdAt: m.createdAt,
   }
+  if (m.uploaderSession !== undefined) {
+    out.uploader_session = m.uploaderSession
+  }
+  return out
 }
 
 function decodeMeta(raw: string): FileMeta | null {
