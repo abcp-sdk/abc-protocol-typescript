@@ -2,7 +2,9 @@
   "$schema": "https://biomejs.dev/schemas/2.5.9/schema.json",
   "files": {
     "ignoreUnknown": false,
-    "includes": ["packages/**/*.{ts,js,json}", "tests/**/*.ts"]
+    "includes": [
+      "tests/**/*.ts"
+    ]
   },
   "formatter": {
     "enabled": true,
@@ -29,7 +31,9 @@
   },
   "overrides": [
     {
-      "includes": ["**/*.test.ts"],
+      "includes": [
+        "**/*.test.ts"
+      ],
       "linter": {
         "rules": {
           "suspicious": {

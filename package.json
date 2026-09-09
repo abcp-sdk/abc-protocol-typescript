@@ -1,22 +1,30 @@
 {
-  "name": "abc-protocol-sdk-ts",
-  "private": true,
+  "name": "@abc-protocol/sdk",
+  "version": "1.0.7",
   "type": "module",
-  "workspaces": [
-    "packages/*"
-  ],
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*",
+    "./tests/*": "./tests/*"
+  },
   "scripts": {
-    "check": "biome check .",
-    "typecheck": "tsc --noEmit",
-    "build": "tsc --noEmit",
-    "test": "vitest run",
-    "check:fix": "biome check --fix .",
-    "format": "biome format --write ."
+    "check": "tsc --noEmit",
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@asteasolutions/zod-to-openapi": "^9.1.0",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3",
+    "@nats-io/jetstream": "^3.4.0",
+    "@nats-io/kv": "^3.4.0",
+    "@nats-io/nats-core": "^3.4.0",
+    "@nats-io/obj": "^3.4.0",
+    "@nats-io/transport-node": "^3.4.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.9",
     "@types/node": "^26.2.0",
-    "tsx": "^4.19.2",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   }
