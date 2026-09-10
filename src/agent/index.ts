@@ -728,6 +728,14 @@ export class Agent {
    * subscription: first the retained history from `startTimeMs` (or from now
    * when omitted), then live events — no polling, no replay/live handover
    * race. Yields raw `{event, params?, eid?}` items.
+   *
+   * CATCH-UP COALESCING: while the consumer is behind (`envelope.pending > 0`)
+   * consecutive deltas of the same part (`reasoning-delta` / `text-delta`, same
+   * run_id + part id) are merged into a single event, so a long turn's tens of
+   * thousands of token deltas replay as one (or a few) events instead of
+   * thousands. Structural events (`*-start/end`, `step-start`, `tool-*`,
+   * `turn-complete`) force a flush first. Once caught up (`pending == 0`) the
+   * deltas are streamed one-by-one so live typing stays incremental.
    */
   async *streamEvents(
     sessionName: string,
@@ -737,6 +745,20 @@ export class Agent {
       CH.sessionEvents(sessionName),
       opts,
     )
+    const isDelta = (e: string) => e === 'reasoning-delta' || e === 'text-delta'
+    const buffer = new Map<
+      string,
+      { event: string; params: Record<string, unknown>; eid?: string }
+    >()
+    const order: string[] = []
+    const flush = function* () {
+      for (const k of order) {
+        const v = buffer.get(k)
+        if (v !== undefined) yield v
+      }
+      buffer.clear()
+      order.length = 0
+    }
     try {
       for await (const env of sub) {
         const p = env.payload as {
@@ -745,10 +767,50 @@ export class Agent {
           eid?: string
         }
         if (typeof p?.event !== 'string') continue
-        const item: { event: string; params?: unknown; eid?: string } = {
-          event: p.event,
+        const event = p.event
+        const params = (
+          p.params !== null && typeof p.params === 'object' ? p.params : {}
+        ) as Record<string, unknown>
+        const live = env.pending === 0
+        if (isDelta(event)) {
+          if (live && buffer.size === 0) {
+            const item: { event: string; params?: unknown; eid?: string } = {
+              event,
+              params,
+            }
+            if (p.eid !== undefined) item.eid = p.eid
+            yield item
+            continue
+          }
+          const key = `${String(params.run_id ?? '')}|${event}|${String(
+            params.id ?? '',
+          )}`
+          const existing = buffer.get(key)
+          if (existing === undefined) {
+            const item: { event: string; params: Record<string, unknown>; eid?: string } = {
+              event,
+              params,
+            }
+            if (p.eid !== undefined) item.eid = p.eid
+            buffer.set(key, item)
+            order.push(key)
+          } else {
+            existing.params = {
+              ...existing.params,
+              text: `${String(existing.params.text ?? '')}${String(
+                params.text ?? '',
+              )}`,
+            }
+          }
+          if (live) yield* flush()
+          continue
         }
-        if (p.params !== undefined) item.params = p.params
+        // Structural event: emit buffered deltas first, then the event itself.
+        if (buffer.size > 0) yield* flush()
+        const item: { event: string; params?: unknown; eid?: string } = {
+          event,
+          params,
+        }
         if (p.eid !== undefined) item.eid = p.eid
         yield item
       }

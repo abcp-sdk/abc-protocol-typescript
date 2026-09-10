@@ -34,6 +34,9 @@
           "reply_to": {
             "type": "string"
           },
+          "pending": {
+            "type": "integer"
+          },
           "payload": {
             "description": "Opaque business body."
           }
@@ -434,6 +437,12 @@
                 "description": {
                   "type": "string"
                 },
+                "descriptions": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
                 "scope": {
                   "type": "string",
                   "enum": [
@@ -580,6 +589,12 @@
           },
           "description": {
             "type": "string"
+          },
+          "descriptions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
           },
           "scope": {
             "type": "string",

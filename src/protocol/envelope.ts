@@ -39,6 +39,14 @@ export const EnvelopeSchema = z.object({
   id: z.string().optional(),
   session_name: z.string().optional(),
   reply_to: z.string().optional(),
+  /**
+   * Transport metadata (NOT set by publishers): the number of messages still
+   * pending on the delivering consumer at the moment this message was
+   * delivered. 0 = the consumer has caught up with the stream head (this
+   * message is live); >0 = messages remain queued behind it (catch-up). Only
+   * populated on ordered-stream deliveries (see `subscribeStream`).
+   */
+  pending: z.number().int().optional(),
   payload: z
     .unknown()
     .openapi({ description: 'Opaque business body.' })

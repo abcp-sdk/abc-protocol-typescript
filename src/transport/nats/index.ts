@@ -331,7 +331,7 @@ export class NatsBus implements Bus {
       ...start,
       inactive_threshold: 60_000_000_000,
     } as never)
-    const messages = await consumer.consume()
+    const messages = await consumer.consume({ max_messages: 10_000 })
     const bus = this
     return {
       [Symbol.asyncIterator]() {
@@ -342,7 +342,6 @@ export class NatsBus implements Bus {
       },
     }
   }
-
   async inboxPublish(
     ch: string,
     payload: unknown,
@@ -543,6 +542,9 @@ async function* decodeConsumerIter(
     if (bus !== undefined && !bus.verifyMsg(m)) continue
     const env = decode(m)
     if (env === null) continue
+    // Stamp the consumer's pending count (0 = caught up / live; >0 = catch-up)
+    // so ordered-stream consumers can coalesce the catch-up burst.
+    env.pending = m.info.pending
     yield env
   }
 }
