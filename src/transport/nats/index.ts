@@ -475,32 +475,42 @@ export class NatsBus implements Bus {
     }
   }
 
-  async replay(ch: string): Promise<Envelope[]> {
+  async replay(
+    ch: string,
+    opts?: { startTimeMs?: number },
+  ): Promise<Envelope[]> {
     const out: Envelope[] = []
     const jsm = await jetstreamManager(this.nc).catch(() => null)
     if (jsm === null) return out
     const stream = streamFor(ch)
-    // Anchor the window at the stream TAIL so the newest events (the active
-    // turn) are always included, regardless of session length.
-    const REPLAY_WINDOW = 10_000
-    let startSeq = 1
-    try {
-      const info = await jsm.streams.info(stream)
-      startSeq = Math.max(1, info.state.last_seq - REPLAY_WINDOW + 1)
-    } catch {
-      // Stream missing — nothing to replay.
-      return out
+    // Cap for the drain loop (a single turn can emit tens of thousands of
+    // deltas; this is a safety bound, not the window).
+    const MAX_EVENTS = 200_000
+    const consumerConfig: Record<string, unknown> = {
+      filter_subjects: [ch],
+      ack_policy: 'explicit',
+      inactive_threshold: 60_000_000_000,
     }
-    // Ephemeral consumer (no durable name), filtered to the exact subject,
-    // starting at the tail window.
+    if (opts?.startTimeMs !== undefined) {
+      // Exact window from a wall-clock instant (the turn's start): never
+      // truncated by how many events OTHER sessions produced in between.
+      consumerConfig.deliver_policy = 'by_start_time'
+      consumerConfig.opt_start_time = new Date(opts.startTimeMs).toISOString()
+    } else {
+      // Fallback: newest window anchored at the stream tail.
+      const REPLAY_WINDOW = 10_000
+      let startSeq = 1
+      try {
+        const info = await jsm.streams.info(stream)
+        startSeq = Math.max(1, info.state.last_seq - REPLAY_WINDOW + 1)
+      } catch {
+        return out
+      }
+      consumerConfig.deliver_policy = 'by_start_sequence'
+      consumerConfig.opt_start_seq = startSeq
+    }
     const consumer = await jsm.consumers
-      .add(stream, {
-        filter_subjects: [ch],
-        ack_policy: 'explicit',
-        deliver_policy: 'by_start_sequence',
-        opt_start_seq: startSeq,
-        inactive_threshold: 60_000_000_000,
-      })
+      .add(stream, consumerConfig as never)
       .catch(() => null)
     if (consumer === null) return out
     try {
@@ -516,7 +526,7 @@ export class NatsBus implements Bus {
           m.ack()
           got++
         }
-        if (got === 0 || out.length >= REPLAY_WINDOW) break
+        if (got === 0 || out.length >= MAX_EVENTS) break
       }
     } catch {
       // Stream missing / no retained messages — return what we have.

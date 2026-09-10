@@ -731,9 +731,13 @@ export class Agent {
    */
   async replayEvents(
     sessionName: string,
+    opts?: { startTimeMs?: number },
   ): Promise<Array<{ event: string; params?: unknown; eid?: string }>> {
     const out: Array<{ event: string; params?: unknown; eid?: string }> = []
-    const envelopes = await this.bus.replay(CH.sessionEvents(sessionName))
+    const envelopes = await this.bus.replay(
+      CH.sessionEvents(sessionName),
+      opts,
+    )
     for (const env of envelopes) {
       const p = env.payload as {
         event?: string

@@ -98,8 +98,12 @@ export interface Bus {
    * Replay the retained (durably queued) envelopes for a channel, oldest
    * first. Retention is a transport property (NATS: stream max_age; inproc:
    * in-memory log); the protocol promise is a bounded recent window.
+   *
+   * When `startTimeMs` is given, the window starts at that wall-clock time
+   * (used to replay exactly one turn, regardless of how many events other
+   * sessions produced); otherwise a bounded newest window is returned.
    */
-  replay(ch: string): Promise<Envelope[]>
+  replay(ch: string, opts?: { startTimeMs?: number }): Promise<Envelope[]>
 
   /** Store a (potentially large) object; transports chunk internally. */
   objectPut(name: string, data: Uint8Array): Promise<void>
