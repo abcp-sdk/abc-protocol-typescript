@@ -462,14 +462,6 @@ export class NatsBus implements Bus {
     }
   }
 
-  /**
-   * Replay the retained queue envelopes for a channel (JetStream stream
-   * contents via an ephemeral ordered-ish consumer), oldest first.
-   */
-  /**
-   * Replay the retained queue envelopes for a channel via an ephemeral
-   * JetStream consumer (deliver_policy all), oldest first.
-   */
   /** create-or-open: creating an existing bucket with a different config
    * (e.g. another per-call TTL) errors, so fall back to opening it. */
   private async openKv(
@@ -487,31 +479,49 @@ export class NatsBus implements Bus {
     const out: Envelope[] = []
     const jsm = await jetstreamManager(this.nc).catch(() => null)
     if (jsm === null) return out
-    // Ephemeral consumer (no durable name) over the mailbox stream,
-    // filtered to the exact subject, delivering the whole retained window.
+    const stream = streamFor(ch)
+    // Anchor the window at the stream TAIL so the newest events (the active
+    // turn) are always included, regardless of session length.
+    const REPLAY_WINDOW = 10_000
+    let startSeq = 1
+    try {
+      const info = await jsm.streams.info(stream)
+      startSeq = Math.max(1, info.state.last_seq - REPLAY_WINDOW + 1)
+    } catch {
+      // Stream missing — nothing to replay.
+      return out
+    }
+    // Ephemeral consumer (no durable name), filtered to the exact subject,
+    // starting at the tail window.
     const consumer = await jsm.consumers
-      .add(streamFor(ch), {
+      .add(stream, {
         filter_subjects: [ch],
         ack_policy: 'explicit',
-        deliver_policy: 'all',
+        deliver_policy: 'by_start_sequence',
+        opt_start_seq: startSeq,
         inactive_threshold: 60_000_000_000,
       })
       .catch(() => null)
     if (consumer === null) return out
     try {
       const js = jetstream(this.nc)
-      const c = await js.consumers.get(streamFor(ch), consumer.name)
-      // fetch() terminates after `expires` — bounded replay, no live tail.
-      const messages = await c.fetch({ expires: 1_000, max_messages: 1024 })
-      for await (const m of messages) {
-        const env = decode(m)
-        if (env !== null) out.push(env)
-        m.ack()
+      const c = await js.consumers.get(stream, consumer.name)
+      // Drain in batches until no more retained messages (or a hard cap).
+      for (;;) {
+        const messages = await c.fetch({ expires: 1_000, max_messages: 5_000 })
+        let got = 0
+        for await (const m of messages) {
+          const env = decode(m)
+          if (env !== null) out.push(env)
+          m.ack()
+          got++
+        }
+        if (got === 0 || out.length >= REPLAY_WINDOW) break
       }
     } catch {
-      // Stream missing / no retained messages — empty replay.
+      // Stream missing / no retained messages — return what we have.
     }
-    await jsm.consumers.delete(streamFor(ch), consumer.name).catch(() => {})
+    await jsm.consumers.delete(stream, consumer.name).catch(() => {})
     return out
   }
 
