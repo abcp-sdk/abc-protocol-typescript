@@ -513,12 +513,18 @@ export class NatsBus implements Bus {
       .add(stream, consumerConfig as never)
       .catch(() => null)
     if (consumer === null) return out
+    const BATCH = 5_000
     try {
       const js = jetstream(this.nc)
       const c = await js.consumers.get(stream, consumer.name)
-      // Drain in batches until no more retained messages (or a hard cap).
+      // Drain in batches. Stop as soon as a fetch returns FEWER than the
+      // requested batch: that means it hit the `expires` timeout, i.e. it has
+      // caught up with everything retained at that instant. Critically, do
+      // NOT loop until a zero-length fetch: during a live turn new events keep
+      // arriving, so a "wait for zero" loop never terminates and blocks the
+      // whole replay for minutes (the client then sees nothing).
       for (;;) {
-        const messages = await c.fetch({ expires: 1_000, max_messages: 5_000 })
+        const messages = await c.fetch({ expires: 1_000, max_messages: BATCH })
         let got = 0
         for await (const m of messages) {
           const env = decode(m)
@@ -526,7 +532,7 @@ export class NatsBus implements Bus {
           m.ack()
           got++
         }
-        if (got === 0 || out.length >= MAX_EVENTS) break
+        if (got < BATCH || out.length >= MAX_EVENTS) break
       }
     } catch {
       // Stream missing / no retained messages — return what we have.
