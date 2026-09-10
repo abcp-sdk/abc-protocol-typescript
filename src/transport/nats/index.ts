@@ -193,7 +193,7 @@ export class NatsBus implements Bus {
   verifyMsg(m: {
     data: Uint8Array
     subject: string
-    headers?: MsgHdrs
+    headers?: MsgHdrs | undefined
   }): boolean {
     if (this.idn === undefined) return true
     const sig = m.headers?.get('abc-sig')
@@ -300,6 +300,45 @@ export class NatsBus implements Bus {
       },
       async close() {
         sub.unsubscribe()
+      },
+    }
+  }
+
+  /**
+   * Subscribe to a channel as a single ordered stream: FIRST every retained
+   * message from `startTimeMs` (or from "now" when omitted), THEN live
+   * messages, with no gap and no polling. Implemented with a JetStream ordered
+   * consumer, which transparently recreates itself at the right sequence if a
+   * delivery gap is ever detected, so no replay/live handover race exists.
+   */
+  async subscribeStream(
+    ch: string,
+    opts?: { startTimeMs?: number },
+  ): Promise<Subscription> {
+    const js = jetstream(this.nc)
+    const start =
+      opts?.startTimeMs !== undefined
+        ? {
+            deliver_policy: 'by_start_time' as const,
+            opt_start_time: new Date(opts.startTimeMs).toISOString(),
+          }
+        : {
+            deliver_policy: 'new' as const,
+          }
+    // An ordered consumer is created by passing options (not a durable name).
+    const consumer = await js.consumers.get(streamFor(ch), {
+      filter_subjects: [ch],
+      ...start,
+      inactive_threshold: 60_000_000_000,
+    } as never)
+    const messages = await consumer.consume()
+    const bus = this
+    return {
+      [Symbol.asyncIterator]() {
+        return decodeConsumerIter(messages, bus)
+      },
+      async close() {
+        await messages.close()
       },
     }
   }
@@ -475,72 +514,6 @@ export class NatsBus implements Bus {
     }
   }
 
-  async replay(
-    ch: string,
-    opts?: { startTimeMs?: number },
-  ): Promise<Envelope[]> {
-    const out: Envelope[] = []
-    const jsm = await jetstreamManager(this.nc).catch(() => null)
-    if (jsm === null) return out
-    const stream = streamFor(ch)
-    // Cap for the drain loop (a single turn can emit tens of thousands of
-    // deltas; this is a safety bound, not the window).
-    const MAX_EVENTS = 200_000
-    const consumerConfig: Record<string, unknown> = {
-      filter_subjects: [ch],
-      ack_policy: 'explicit',
-      inactive_threshold: 60_000_000_000,
-    }
-    if (opts?.startTimeMs !== undefined) {
-      // Exact window from a wall-clock instant (the turn's start): never
-      // truncated by how many events OTHER sessions produced in between.
-      consumerConfig.deliver_policy = 'by_start_time'
-      consumerConfig.opt_start_time = new Date(opts.startTimeMs).toISOString()
-    } else {
-      // Fallback: newest window anchored at the stream tail.
-      const REPLAY_WINDOW = 10_000
-      let startSeq = 1
-      try {
-        const info = await jsm.streams.info(stream)
-        startSeq = Math.max(1, info.state.last_seq - REPLAY_WINDOW + 1)
-      } catch {
-        return out
-      }
-      consumerConfig.deliver_policy = 'by_start_sequence'
-      consumerConfig.opt_start_seq = startSeq
-    }
-    const consumer = await jsm.consumers
-      .add(stream, consumerConfig as never)
-      .catch(() => null)
-    if (consumer === null) return out
-    const BATCH = 5_000
-    try {
-      const js = jetstream(this.nc)
-      const c = await js.consumers.get(stream, consumer.name)
-      // Drain in batches. Stop as soon as a fetch returns FEWER than the
-      // requested batch: that means it hit the `expires` timeout, i.e. it has
-      // caught up with everything retained at that instant. Critically, do
-      // NOT loop until a zero-length fetch: during a live turn new events keep
-      // arriving, so a "wait for zero" loop never terminates and blocks the
-      // whole replay for minutes (the client then sees nothing).
-      for (;;) {
-        const messages = await c.fetch({ expires: 1_000, max_messages: BATCH })
-        let got = 0
-        for await (const m of messages) {
-          const env = decode(m)
-          if (env !== null) out.push(env)
-          m.ack()
-          got++
-        }
-        if (got < BATCH || out.length >= MAX_EVENTS) break
-      }
-    } catch {
-      // Stream missing / no retained messages — return what we have.
-    }
-    await jsm.consumers.delete(stream, consumer.name).catch(() => {})
-    return out
-  }
-
   async close(): Promise<void> {
     // Drain may reject with ClosedConnectionError when the server already
     // tore down interest (e.g. after consumer/sub teardown races); close is
@@ -558,6 +531,18 @@ async function* decodeIter(
     const env = decode(m)
     if (env === null) continue
     if (m.reply !== '') env.reply_to = m.reply
+    yield env
+  }
+}
+
+async function* decodeConsumerIter(
+  messages: ConsumerMessages,
+  bus?: NatsBus,
+): AsyncGenerator<Envelope> {
+  for await (const m of messages) {
+    if (bus !== undefined && !bus.verifyMsg(m)) continue
+    const env = decode(m)
+    if (env === null) continue
     yield env
   }
 }

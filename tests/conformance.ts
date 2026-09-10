@@ -648,6 +648,7 @@ export function runConformance(name: string, newPair: Factory): void {
       await ext.serve()
       await sleep(50)
 
+      const startTimeMs = Date.now() - 60_000
       await publishSessionEvent(extensionBus, 'sess-rp', 'status', {
         type: 'busy',
       })
@@ -658,7 +659,11 @@ export function runConformance(name: string, newPair: Factory): void {
       await sleep(150)
 
       const a = new Agent(agentBus)
-      const events = await a.replayEvents('sess-rp')
+      const events: Array<{ event: string; eid?: string }> = []
+      for await (const e of a.streamEvents('sess-rp', { startTimeMs })) {
+        events.push(e)
+        if (e.event === 'turn-complete') break
+      }
       expect(events.map(e => e.event)).toEqual([
         'status',
         'text',

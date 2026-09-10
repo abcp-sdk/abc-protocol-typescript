@@ -84,6 +84,16 @@ export interface Bus {
   /** Live subscription (opts.queue enables a competing queue group). */
   subscribe(ch: string, opts?: SubscribeOpts): Promise<Subscription>
 
+  /**
+   * Ordered stream subscription: FIRST every retained message from
+   * `startTimeMs` (or from "now" when omitted), THEN live messages — over a
+   * single ordered consumer with no polling and no replay/live handover race.
+   */
+  subscribeStream(
+    ch: string,
+    opts?: { startTimeMs?: number },
+  ): Promise<Subscription>
+
   /** Durable inbox publish (at-least-once). */
   inboxPublish(
     ch: string,
@@ -93,17 +103,6 @@ export interface Bus {
 
   /** Durable inbox consume with explicit ack/nak/term. */
   inboxConsume(opts?: InboxConsumeOpts): Promise<InboxSubscription>
-
-  /**
-   * Replay the retained (durably queued) envelopes for a channel, oldest
-   * first. Retention is a transport property (NATS: stream max_age; inproc:
-   * in-memory log); the protocol promise is a bounded recent window.
-   *
-   * When `startTimeMs` is given, the window starts at that wall-clock time
-   * (used to replay exactly one turn, regardless of how many events other
-   * sessions produced); otherwise a bounded newest window is returned.
-   */
-  replay(ch: string, opts?: { startTimeMs?: number }): Promise<Envelope[]>
 
   /** Store a (potentially large) object; transports chunk internally. */
   objectPut(name: string, data: Uint8Array): Promise<void>

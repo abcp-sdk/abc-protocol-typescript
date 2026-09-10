@@ -724,36 +724,37 @@ export class Agent {
   }
 
   /**
-   * Replay the retained session events for a session (abc.session.events.
-   * <token>), oldest first. Returns the raw `{event, params?, eid?}` items;
-   * replay window/retention is a channel property (24h on NATS), and how
-   * much of the replay to show is the consumer's policy.
+   * Stream a session's events (abc.session.events.<token>) over ONE ordered
+   * subscription: first the retained history from `startTimeMs` (or from now
+   * when omitted), then live events — no polling, no replay/live handover
+   * race. Yields raw `{event, params?, eid?}` items.
    */
-  async replayEvents(
+  async *streamEvents(
     sessionName: string,
     opts?: { startTimeMs?: number },
-  ): Promise<Array<{ event: string; params?: unknown; eid?: string }>> {
-    const out: Array<{ event: string; params?: unknown; eid?: string }> = []
-    const envelopes = await this.bus.replay(
+  ): AsyncGenerator<{ event: string; params?: unknown; eid?: string }> {
+    const sub = await this.bus.subscribeStream(
       CH.sessionEvents(sessionName),
       opts,
     )
-    for (const env of envelopes) {
-      const p = env.payload as {
-        event?: string
-        params?: unknown
-        eid?: string
-      }
-      if (typeof p?.event === 'string') {
+    try {
+      for await (const env of sub) {
+        const p = env.payload as {
+          event?: string
+          params?: unknown
+          eid?: string
+        }
+        if (typeof p?.event !== 'string') continue
         const item: { event: string; params?: unknown; eid?: string } = {
           event: p.event,
         }
         if (p.params !== undefined) item.params = p.params
         if (p.eid !== undefined) item.eid = p.eid
-        out.push(item)
+        yield item
       }
+    } finally {
+      await sub.close().catch(() => {})
     }
-    return out
   }
 
   async close(): Promise<void> {

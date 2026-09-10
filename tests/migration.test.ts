@@ -22,10 +22,20 @@ describe('abc stream topology reconcile', () => {
       await nc.close()
 
       const bus = await connectNatsBus(server.url)
-      await publishSessionEvent(bus, 'sess-reconcile', 'ok')
       const a = new Agent(bus)
-      const envs = await a.replayEvents('sess-reconcile')
-      if (envs.length === 0) throw new Error('reconcile broke event replay')
+      // Ordered stream subscription (live from "now"), then publish: proves
+      // the reconciled topology routes events into the ABC_EVENTS stream.
+      const got: unknown[] = []
+      const done = (async () => {
+        for await (const e of a.streamEvents('sess-reconcile')) {
+          got.push(e)
+          break
+        }
+      })()
+      await new Promise(r => setTimeout(r, 100))
+      await publishSessionEvent(bus, 'sess-reconcile', 'ok')
+      await done
+      if (got.length === 0) throw new Error('reconcile broke event stream')
       await bus.close()
     } finally {
       await server.stop()
