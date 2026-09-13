@@ -28,6 +28,7 @@ describe('abc identity: opt-in message authentication', () => {
     await ext.serve()
     await sleep(300)
     const tr = await new Agent(agentBus).callTool(
+      't1',
       'sess-id',
       'id-ext',
       'echo',
@@ -75,6 +76,7 @@ describe('abc identity: opt-in message authentication', () => {
     await plainExt.serve()
     await sleep(300)
     const tr2 = await new Agent(plainBus2).callTool(
+      't1',
       'sess-p',
       'plain-ext',
       'ping',

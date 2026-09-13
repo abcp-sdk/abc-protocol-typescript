@@ -135,9 +135,9 @@ export async function start(opts: ServerConfig = {}): Promise<Server> {
       const nc = await connect({ servers: url })
       const jsm = await jetstreamManager(nc)
       for (const s of [
-        { name: 'ABC_MAILBOX', subjects: ['abc.mailbox.>'] },
-        { name: 'ABC_EVENTS', subjects: ['abc.session.events.>'] },
-        { name: 'ABC_DLQ', subjects: ['abc.dlq.>'] },
+        { name: 'ABC_MAILBOX', subjects: ['abc.*.mailbox.>'] },
+        { name: 'ABC_EVENTS', subjects: ['abc.*.session.events.>'] },
+        { name: 'ABC_DLQ', subjects: ['abc.*.dlq.>'] },
       ]) {
         await jsm.streams.add({
           name: s.name,

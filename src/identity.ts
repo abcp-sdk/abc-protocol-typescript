@@ -5,6 +5,9 @@ import { createHmac, timingSafeEqual } from 'node:crypto'
  * `secret`. Messages carry the sender's `abc-id` plus an HMAC (`abc-sig`) over
  * the canonical fields, so receivers authenticate the sender without a CA.
  * Revocation/rotation are deployment-level (redeploy with a new secret).
+ *
+ * The tenant is part of the signed fields, so a signature minted for one
+ * tenant can never be replayed under another.
  */
 
 export interface Identity {
@@ -12,10 +15,19 @@ export interface Identity {
   secret: string
 }
 
+/** The signed fields of a message (tenant included). */
+export interface SignFields {
+  tenant: string
+  ch: string
+  kind: string
+  id?: string
+  payload?: unknown
+}
+
 /** Build the header a sender attaches to an outgoing message. */
 export function authHeader(
   identity: Identity,
-  fields: { ch: string; kind: string; id?: string; payload?: unknown },
+  fields: SignFields,
 ): { 'abc-id': string; 'abc-sig': string } {
   return {
     'abc-id': identity.id,
@@ -23,14 +35,11 @@ export function authHeader(
   }
 }
 
-function canonical(
-  id: string,
-  fields: { ch: string; kind: string; id?: string; payload?: unknown },
-): string {
+function canonical(id: string, fields: SignFields): string {
   const payload =
     fields.payload === undefined ? '' : JSON.stringify(fields.payload)
   const msgId = fields.id ?? ''
-  return `${id}\n${fields.ch}\n${fields.kind}\n${msgId}\n${payload}`
+  return `${id}\n${fields.tenant}\n${fields.ch}\n${fields.kind}\n${msgId}\n${payload}`
 }
 
 /**
@@ -40,7 +49,7 @@ function canonical(
 export function verify(
   claimedId: string,
   secret: string,
-  fields: { ch: string; kind: string; id?: string; payload?: unknown },
+  fields: SignFields,
   provided: string,
 ): boolean {
   const want = sign({ id: claimedId, secret }, fields)
@@ -51,10 +60,7 @@ export function verify(
   return a.length === b.length && timingSafeEqual(a, b)
 }
 
-function sign(
-  identity: Identity,
-  fields: { ch: string; kind: string; id?: string; payload?: unknown },
-): string {
+function sign(identity: Identity, fields: SignFields): string {
   return createHmac('sha256', identity.secret)
     .update(canonical(identity.id, fields))
     .digest('base64url')

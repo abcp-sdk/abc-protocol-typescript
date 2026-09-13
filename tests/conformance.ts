@@ -1,6 +1,7 @@
 import { jetstreamManager } from '@nats-io/jetstream'
 import { connect } from '@nats-io/transport-node'
 import { describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
 import {
   Agent,
   type MailboxMessageResolved,
@@ -21,10 +22,20 @@ import {
   setSessionVariable,
   type ToolResultData,
 } from '../src/extension/index.js'
+import { newFileStore } from '../src/protocol/file.js'
 import { start as startNats } from '../src/natsrun/index.js'
 import type { ExtensionManifest } from '../src/protocol/index.js'
 import { CH, type LifecycleEvent, sessionToken } from '../src/protocol/index.js'
 import { connectNatsBus } from '../src/transport/nats/index.js'
+
+/** The tenant every conformance case runs under. */
+const T = 't1'
+/** A second tenant used by the isolation cases. */
+const T2 = 't2'
+
+/** Extension.getConfig scoped to the test tenant. */
+const getExt = (ext: Extension, name: string, session?: string): unknown =>
+  ext.getConfig(name, session, T)
 
 export interface Pair {
   agentBus: Bus
@@ -123,7 +134,7 @@ export function runConformance(name: string, newPair: Factory): void {
     it('tool returns content', async () => {
       const { agentBus, extensionBus, cleanup } = await newPair()
       const ext = await serveConfExt(extensionBus)
-      const tr = await new Agent(agentBus).callTool(
+      const tr = await new Agent(agentBus).callTool(T,
         'sess-1',
         'conf-ext',
         'echo',
@@ -138,7 +149,7 @@ export function runConformance(name: string, newPair: Factory): void {
     it('tool returns structured data', async () => {
       const { agentBus, extensionBus, cleanup } = await newPair()
       const ext = await serveConfExt(extensionBus)
-      const tr = await new Agent(agentBus).callTool(
+      const tr = await new Agent(agentBus).callTool(T,
         'sess-1',
         'conf-ext',
         'add',
@@ -154,9 +165,9 @@ export function runConformance(name: string, newPair: Factory): void {
       const { agentBus, extensionBus, cleanup } = await newPair()
       const ext = await serveConfExt(extensionBus)
       const a = new Agent(agentBus)
-      const tr = await a.callTool('sess-1', 'conf-ext', 'big', 'c3', {})
+      const tr = await a.callTool(T, 'sess-1', 'conf-ext', 'big', 'c3', {})
       expect(tr.object?.id).toBeTruthy()
-      const bytes = await a.getObject(tr.object?.id ?? '')
+      const bytes = await a.getObject(T, tr.object?.id ?? '')
       expect(bytes?.length).toBe(300 * 1024)
       await ext.close()
       await cleanup()
@@ -165,7 +176,7 @@ export function runConformance(name: string, newPair: Factory): void {
     it('tool maps thrown errors to the internal code', async () => {
       const { agentBus, extensionBus, cleanup } = await newPair()
       const ext = await serveConfExt(extensionBus)
-      const tr = await new Agent(agentBus).callTool(
+      const tr = await new Agent(agentBus).callTool(T,
         'sess-1',
         'conf-ext',
         'boom',
@@ -180,7 +191,7 @@ export function runConformance(name: string, newPair: Factory): void {
     it('propagates session_name to the tool', async () => {
       const { agentBus, extensionBus, cleanup } = await newPair()
       const ext = await serveConfExt(extensionBus)
-      const tr = await new Agent(agentBus).callTool(
+      const tr = await new Agent(agentBus).callTool(T,
         'sess-42',
         'conf-ext',
         'session',
@@ -198,7 +209,7 @@ export function runConformance(name: string, newPair: Factory): void {
       const a = new Agent(agentBus)
       await expect(
         Promise.race([
-          a.callTool('sess-1', 'conf-ext', 'missing', 'c6', {}),
+          a.callTool(T, 'sess-1', 'conf-ext', 'missing', 'c6', {}),
           sleep(3000).then(() => {
             throw new Error('timeout guard')
           }),
@@ -213,7 +224,7 @@ export function runConformance(name: string, newPair: Factory): void {
       const ext = await serveConfExt(extensionBus)
       const a = new Agent(agentBus)
       const call = (session: string, callId: string) =>
-        a.callTool(session, 'conf-ext', 'hang', callId, {}).then(
+        a.callTool(T, session, 'conf-ext', 'hang', callId, {}).then(
           tr => tr,
           () => undefined,
         )
@@ -221,7 +232,7 @@ export function runConformance(name: string, newPair: Factory): void {
       const other = call('sess-other', 'hang-2')
       await sleep(500)
 
-      await a.interrupt('conf-ext', 'sess-int', 'test')
+      await a.interrupt(T, 'conf-ext', 'sess-int', 'test')
       const mineRes = await Promise.race([
         mine,
         sleep(5000).then(() => {
@@ -240,7 +251,7 @@ export function runConformance(name: string, newPair: Factory): void {
         throw new Error('session-scoped interrupt leaked to other session')
 
       // broadcast interrupt reaches the remaining session
-      await a.interrupt('conf-ext')
+      await a.interrupt(T, 'conf-ext')
       const otherRes = await Promise.race([
         other,
         sleep(5000).then(() => {
@@ -258,7 +269,7 @@ export function runConformance(name: string, newPair: Factory): void {
       const { agentBus, extensionBus, cleanup } = await newPair()
       const ext = await serveConfExt(extensionBus)
       const a = new Agent(agentBus)
-      const tr = await a.callTool('sess-1', 'conf-ext', 'slow', 'slow-1', {})
+      const tr = await a.callTool(T, 'sess-1', 'conf-ext', 'slow', 'slow-1', {})
       expect(tr.content).toBe('woke')
       await ext.close()
       await cleanup()
@@ -268,10 +279,10 @@ export function runConformance(name: string, newPair: Factory): void {
       const { agentBus, extensionBus, cleanup } = await newPair()
       const ext = await serveConfExt(extensionBus)
       const a = new Agent(agentBus)
-      expect(await a.resolveVariable('conf-ext', 'base-url', 'sess-1')).toBe(
+      expect(await a.resolveVariable(T, 'conf-ext', 'base-url', 'sess-1')).toBe(
         'https://example.com/sess-1',
       )
-      expect(await a.resolveVariable('conf-ext', 'nope')).toBeNull()
+      expect(await a.resolveVariable(T, 'conf-ext', 'nope')).toBeNull()
       await ext.close()
       await cleanup()
     })
@@ -279,7 +290,7 @@ export function runConformance(name: string, newPair: Factory): void {
     it('runs a sync call hook', async () => {
       const { agentBus, extensionBus, cleanup } = await newPair()
       const ext = await serveConfExt(extensionBus)
-      const hr = await new Agent(agentBus).callHook(
+      const hr = await new Agent(agentBus).callHook(T, 
         'sess-h',
         'conf-ext',
         'session.before_create',
@@ -298,7 +309,7 @@ export function runConformance(name: string, newPair: Factory): void {
       const { agentBus, extensionBus, cleanup } = await newPair()
       events.length = 0
       const ext = await serveConfExt(extensionBus)
-      await new Agent(agentBus).publishEventHook('sess-ev', 'session.created', {
+      await new Agent(agentBus).publishEventHook(T, 'sess-ev', 'session.created', {
         x: 1,
       })
       await sleep(100)
@@ -315,7 +326,7 @@ export function runConformance(name: string, newPair: Factory): void {
       const { agentBus, extensionBus, cleanup } = await newPair()
       events.length = 0
       const ext = await serveConfExt(extensionBus)
-      await new Agent(agentBus).interrupt('conf-ext', 'sess-i', 'stop')
+      await new Agent(agentBus).interrupt(T, 'conf-ext', 'sess-i', 'stop')
       await sleep(100)
       expect(events).toContainEqual({
         hook: 'interrupt',
@@ -330,12 +341,12 @@ export function runConformance(name: string, newPair: Factory): void {
       const { agentBus, extensionBus, cleanup } = await newPair()
       const ext = await serveConfExt(extensionBus)
       const a = new Agent(agentBus)
-      const sub = await a.subscribeProgress('c-progress')
+      const sub = await a.subscribeProgress(T, 'c-progress')
       const collected: unknown[] = []
       void (async () => {
         for await (const env of sub) collected.push(env.payload)
       })()
-      await ext.reportProgress('c-progress', {
+      await ext.reportProgress(T, 'c-progress', {
         phase: 'sync',
         progress: 0.5,
         text: 'half',
@@ -356,7 +367,7 @@ export function runConformance(name: string, newPair: Factory): void {
         received.push(msg)
       })
       await sleep(50)
-      await new Agent(agentBus).publishMailbox('sess-mb', 'user_prompt', {
+      await new Agent(agentBus).publishMailbox(T, 'sess-mb', 'user_prompt', {
         text: 'hello',
       })
       await sleep(150)
@@ -373,12 +384,12 @@ export function runConformance(name: string, newPair: Factory): void {
     it('round-trips the object store', async () => {
       const { agentBus, cleanup } = await newPair()
       const a = new Agent(agentBus)
-      await a.putObject('test-obj', new TextEncoder().encode('payload-123'))
-      const bytes = await a.getObject('test-obj')
+      await a.putObject(T, 'test-obj', new TextEncoder().encode('payload-123'))
+      const bytes = await a.getObject(T, 'test-obj')
       expect(new TextDecoder().decode(bytes ?? new Uint8Array())).toBe(
         'payload-123',
       )
-      expect(await a.getObject('absent-obj')).toBeNull()
+      expect(await a.getObject(T, 'absent-obj')).toBeNull()
       await cleanup()
     })
 
@@ -400,18 +411,18 @@ export function runConformance(name: string, newPair: Factory): void {
 
     it('exposes the expected channel/token derivations', async () => {
       expect(CH.DISCOVER).toBe('abc.discover')
-      expect(CH.toolCall('ops', 'echo')).toBe('abc.tool.call.ops.echo')
-      expect(CH.toolProgress('c1')).toBe('abc.tool.progress.c1')
-      expect(CH.variable('ops', 'base-url')).toBe('abc.var.ops.base-url')
-      expect(CH.interrupt('ops')).toBe('abc.ctl.interrupt.ops')
-      expect(CH.hookCall('ops', 'session.before_create')).toBe(
-        'abc.hook.call.ops.session.before_create',
+      expect(CH.toolCall(T, 'ops', 'echo')).toBe('abc.t1.tool.call.ops.echo')
+      expect(CH.toolProgress(T, 'c1')).toBe('abc.t1.tool.progress.c1')
+      expect(CH.variable(T, 'ops', 'base-url')).toBe('abc.t1.var.ops.base-url')
+      expect(CH.interrupt(T, 'ops')).toBe('abc.t1.ctl.interrupt.ops')
+      expect(CH.hookCall(T, 'ops', 'session.before_create')).toBe(
+        'abc.t1.hook.call.ops.session.before_create',
       )
-      expect(CH.hookEvent('session.created')).toBe(
-        'abc.hook.event.session.created',
+      expect(CH.hookEvent(T, 'session.created')).toBe(
+        'abc.t1.hook.event.session.created',
       )
-      expect(CH.config('ops')).toBe('abc.config.ops')
-      expect(CH.configGet('ops')).toBe('abc.config.get.ops')
+      expect(CH.config(T, 'ops')).toBe('abc.t1.config.ops')
+      expect(CH.configGet(T, 'ops')).toBe('abc.t1.config.get.ops')
       expect(sessionToken('sess-1')).toBe(GOLDEN.sessionTokenSess1)
       await cleanupNoop()
     })
@@ -431,7 +442,7 @@ export function runConformance(name: string, newPair: Factory): void {
           },
         },
         onConfigChange: name => {
-          applied.push({ name, value: ext.getConfig('poll-interval') })
+          applied.push({ name, value: getExt(ext, 'poll-interval') })
         },
       })
       await ext.serve()
@@ -439,10 +450,10 @@ export function runConformance(name: string, newPair: Factory): void {
 
       const a = new Agent(agentBus)
       await a.discover(300)
-      await a.setConfig('cfg-ext', 'poll-interval', 5)
+      await a.setConfig(T, 'cfg-ext', 'poll-interval', 5)
       await sleep(100)
       expect(applied).toContainEqual({ name: 'poll-interval', value: 5 })
-      expect(ext.getConfig('poll-interval')).toBe(5)
+      expect(getExt(ext, 'poll-interval')).toBe(5)
       await ext.close()
       await cleanup()
     })
@@ -465,10 +476,10 @@ export function runConformance(name: string, newPair: Factory): void {
       const a = new Agent(agentBus)
       await a.discover(300)
       await expect(
-        a.setConfig('cfg-rej', 'knob', { on: true }),
+        a.setConfig(T, 'cfg-rej', 'knob', { on: true }),
       ).rejects.toThrow()
       // The old value stays effective.
-      expect(ext.getConfig('knob')).toEqual({ on: false })
+      expect(getExt(ext, 'knob')).toEqual({ on: false })
       await ext.close()
       await cleanup()
     })
@@ -488,9 +499,9 @@ export function runConformance(name: string, newPair: Factory): void {
 
       const a = new Agent(agentBus)
       await a.discover(300)
-      await expect(a.setConfig('cfg-val', 'limit', 'fast')).rejects.toThrow()
-      await expect(a.setConfig('cfg-val', 'mode', 'turbo')).rejects.toThrow()
-      await expect(a.setConfig('cfg-val', 'nope', 1)).rejects.toThrow()
+      await expect(a.setConfig(T, 'cfg-val', 'limit', 'fast')).rejects.toThrow()
+      await expect(a.setConfig(T, 'cfg-val', 'mode', 'turbo')).rejects.toThrow()
+      await expect(a.setConfig(T, 'cfg-val', 'nope', 1)).rejects.toThrow()
       await ext.close()
       await cleanup()
     })
@@ -509,7 +520,7 @@ export function runConformance(name: string, newPair: Factory): void {
       const a = new Agent(agentBus)
       await a.discover(300)
       await a.serveConfig()
-      await a.setConfig('cfg-snap', 'k', 42)
+      await a.setConfig(T, 'cfg-snap', 'k', 42)
       await sleep(50)
 
       const late = new Extension(extensionBus, {
@@ -519,7 +530,7 @@ export function runConformance(name: string, newPair: Factory): void {
       })
       await late.serve()
       await sleep(50)
-      expect(late.getConfig('k')).toBe(42)
+      expect(getExt(late, 'k')).toBe(42)
       await first.close()
       await late.close()
       await cleanup()
@@ -540,12 +551,12 @@ export function runConformance(name: string, newPair: Factory): void {
 
       const a = new Agent(agentBus)
       await a.discover(300)
-      await a.setConfig('cfg-sess', 'verbose', true)
-      await a.setConfig('cfg-sess', 'threshold', 7, 'sess-a')
+      await a.setConfig(T, 'cfg-sess', 'verbose', true)
+      await a.setConfig(T, 'cfg-sess', 'threshold', 7, 'sess-a')
       await sleep(100)
-      expect(ext.getConfig('verbose')).toBe(true)
-      expect(ext.getConfig('threshold', 'sess-a')).toBe(7)
-      expect(ext.getConfig('threshold')).toBe(1)
+      expect(getExt(ext, 'verbose')).toBe(true)
+      expect(getExt(ext, 'threshold', 'sess-a')).toBe(7)
+      expect(getExt(ext, 'threshold')).toBe(1)
       await ext.close()
       await cleanup()
     })
@@ -571,13 +582,13 @@ export function runConformance(name: string, newPair: Factory): void {
       await sleep(50)
 
       const a = new Agent(agentBus)
-      await a.publishLifecycleEvent('created', 'sess-lc')
-      await a.publishLifecycleEvent('forked', 'sess-lc', { parent: 'parent-s' })
-      await a.publishLifecycleEvent('renamed', 'sess-lc2', {
+      await a.publishLifecycleEvent(T, 'created', 'sess-lc')
+      await a.publishLifecycleEvent(T, 'forked', 'sess-lc', { parent: 'parent-s' })
+      await a.publishLifecycleEvent(T, 'renamed', 'sess-lc2', {
         from: 'sess-lc',
         to: 'sess-lc2',
       })
-      await a.publishLifecycleEvent('deleted', 'sess-lc2')
+      await a.publishLifecycleEvent(T, 'deleted', 'sess-lc2')
       await sleep(150)
       expect(seen.map(e => e.kind)).toEqual([
         'created',
@@ -611,10 +622,10 @@ export function runConformance(name: string, newPair: Factory): void {
       await sleep(50)
 
       const sub = await agentBus.inboxConsume({
-        subject: CH.sessionEvents('sess-se'),
+        subject: CH.sessionEvents(T, 'sess-se'),
       })
       await sleep(50)
-      await publishSessionEvent(extensionBus, 'sess-se', 'todos-updated', {
+      await publishSessionEvent(extensionBus, T, 'sess-se', 'todos-updated', {
         count: 3,
       })
       const got: unknown[] = []
@@ -649,18 +660,18 @@ export function runConformance(name: string, newPair: Factory): void {
       await sleep(50)
 
       const startTimeMs = Date.now() - 60_000
-      await publishSessionEvent(extensionBus, 'sess-rp', 'status', {
+      await publishSessionEvent(extensionBus, T, 'sess-rp', 'status', {
         type: 'busy',
       })
-      await publishSessionEvent(extensionBus, 'sess-rp', 'text', { t: 'a' })
-      await publishSessionEvent(extensionBus, 'sess-rp', 'turn-complete', {
+      await publishSessionEvent(extensionBus, T, 'sess-rp', 'text', { t: 'a' })
+      await publishSessionEvent(extensionBus, T, 'sess-rp', 'turn-complete', {
         reason: 'end',
       })
       await sleep(150)
 
       const a = new Agent(agentBus)
       const events: Array<{ event: string; eid?: string }> = []
-      for await (const e of a.streamEvents('sess-rp', { startTimeMs })) {
+      for await (const e of a.streamEvents(T, 'sess-rp', { startTimeMs })) {
         events.push(e)
         if (e.event === 'turn-complete') break
       }
@@ -679,9 +690,9 @@ export function runConformance(name: string, newPair: Factory): void {
     it('term routes to the dead-letter stream; ack/discard do not', async () => {
       const { agentBus, cleanup } = await newPair()
       const a = new Agent(agentBus)
-      await a.publishMailbox('sess-dlq', 'poison', { bad: true })
-      await a.publishMailbox('sess-dlq', 'healthy', { ok: true })
-      await a.publishMailbox('sess-dlq', 'discard', { gone: true })
+      await a.publishMailbox(T, 'sess-dlq', 'poison', { bad: true })
+      await a.publishMailbox(T, 'sess-dlq', 'healthy', { ok: true })
+      await a.publishMailbox(T, 'sess-dlq', 'discard', { gone: true })
 
       let healthySeen = false
       const stop = await a.consumeMailbox(m => {
@@ -729,9 +740,9 @@ export function runConformance(name: string, newPair: Factory): void {
       })
       await ext.serve()
       const a = new Agent(agentBus)
-      const pending = a.callTool('sess-sig', 'conf-ext', 'watch', 'w1', {})
+      const pending = a.callTool(T, 'sess-sig', 'conf-ext', 'watch', 'w1', {})
       await sleep(500)
-      await a.interrupt('conf-ext', 'sess-sig', 'cleanup-test')
+      await a.interrupt(T, 'conf-ext', 'sess-sig', 'cleanup-test')
       const res = await pending.catch(() => undefined)
       if (!String(res?.error?.message ?? '').includes('interrupted')) {
         throw new Error(`interrupted outcome = ${JSON.stringify(res)}`)
@@ -777,7 +788,7 @@ export function runConformance(name: string, newPair: Factory): void {
         version: '1.0',
         config: [{ name: 'recovered', type: 'string' }],
       } as const
-      await a.setConfig('conf-ext', 'recovered', 'hello-kv', undefined, {
+      await a.setConfig(T, 'conf-ext', 'recovered', 'hello-kv', undefined, {
         manifest: manifest as unknown as ExtensionManifest,
       })
 
@@ -790,14 +801,14 @@ export function runConformance(name: string, newPair: Factory): void {
       await ext.serve()
       const deadline = Date.now() + 10_000
       while (
-        ext.getConfig('recovered') !== 'hello-kv' &&
+        getExt(ext, 'recovered') !== 'hello-kv' &&
         Date.now() < deadline
       ) {
         await sleep(200)
       }
-      if (ext.getConfig('recovered') !== 'hello-kv') {
+      if (getExt(ext, 'recovered') !== 'hello-kv') {
         throw new Error(
-          `config not recovered; got ${String(ext.getConfig('recovered'))}`,
+          `config not recovered; got ${String(getExt(ext, 'recovered'))}`,
         )
       }
       await ext.close()
@@ -827,7 +838,7 @@ export function runConformance(name: string, newPair: Factory): void {
       const a = new Agent(agentBus)
       await a.serveConfig()
       const sess = 'weird.session.name:main'
-      await a.setConfig('conf-ext', 'dots', 'escaped-ok', sess, {
+      await a.setConfig(T, 'conf-ext', 'dots', 'escaped-ok', sess, {
         manifest: {
           id: 'conf-ext',
           version: '1.0',
@@ -842,14 +853,14 @@ export function runConformance(name: string, newPair: Factory): void {
       await ext.serve()
       const deadline = Date.now() + 10_000
       while (
-        ext.getConfig('dots', sess) !== 'escaped-ok' &&
+        getExt(ext, 'dots', sess) !== 'escaped-ok' &&
         Date.now() < deadline
       ) {
         await sleep(200)
       }
-      if (ext.getConfig('dots', sess) !== 'escaped-ok') {
+      if (getExt(ext, 'dots', sess) !== 'escaped-ok') {
         throw new Error(
-          `dot session config not recovered: ${String(ext.getConfig('dots', sess))}`,
+          `dot session config not recovered: ${String(getExt(ext, 'dots', sess))}`,
         )
       }
       await ext.close()
@@ -888,19 +899,19 @@ export function runConformance(name: string, newPair: Factory): void {
       await ext.serve()
       const a = new Agent(agentBus)
       // bad call args -> in-band invalid_argument
-      const res = await a.callHook('sess-h', 'conf-ext', 'audit', {
+      const res = await a.callHook(T, 'sess-h', 'conf-ext', 'audit', {
         nope: true,
       })
       if (res.ok || res.error?.code !== 'invalid_argument') {
         throw new Error('bad call args accepted: ' + JSON.stringify(res))
       }
       // bad event payload -> dropped
-      await a.publishEventHook('sess-h', 'notice', { unknown: 1 })
+      await a.publishEventHook(T, 'sess-h', 'notice', { unknown: 1 })
       await sleep(300)
       if (delivered.length !== 0)
         throw new Error('invalid event payload delivered')
       // valid payloads flow
-      await a.publishEventHook('sess-h', 'notice', { kind: 'ok' })
+      await a.publishEventHook(T, 'sess-h', 'notice', { kind: 'ok' })
       const deadline = Date.now() + 500
       while (delivered.length === 0 && Date.now() < deadline) await sleep(100)
       if (delivered.length === 0)
@@ -929,7 +940,7 @@ export function runConformance(name: string, newPair: Factory): void {
         received.push(msg)
       })
       await sleep(50)
-      await publishMailboxEvent(extensionBus, 'sess-xm', 'event', {
+      await publishMailboxEvent(extensionBus, T, 'sess-xm', 'event', {
         done: true,
       })
       await sleep(150)
@@ -962,17 +973,18 @@ export function runConformance(name: string, newPair: Factory): void {
       await sleep(50)
 
       const a = new Agent(agentBus)
-      expect(await a.resolveVariable('var-ext', 'ws', session)).toBe(
+      expect(await a.resolveVariable(T, 'var-ext', 'ws', session)).toBe(
         `ws-${session}`,
       )
       await setSessionVariable(
         extensionBus,
+        T,
         'var-ext',
         session,
         'ws',
         'ws-cached',
       )
-      expect(await a.resolveVariable('var-ext', 'ws', session)).toBe(
+      expect(await a.resolveVariable(T, 'var-ext', 'ws', session)).toBe(
         'ws-cached',
       )
       expect(resolves).toBe(1)
@@ -984,22 +996,22 @@ export function runConformance(name: string, newPair: Factory): void {
       const { agentBus, cleanup } = await newPair()
       const session = `sess-lease-${Date.now()}`
 
-      const rev = await claimSession(agentBus, session, 1000)
+      const rev = await claimSession(agentBus, T, session, 1000)
       expect(rev).not.toBeNull()
       // Mutual exclusion: a second claim is refused.
-      expect(await claimSession(agentBus, session, 1000)).toBeNull()
-      expect(await isSessionRunning(agentBus, session)).toBe(true)
+      expect(await claimSession(agentBus, T, session, 1000)).toBeNull()
+      expect(await isSessionRunning(agentBus, T, session)).toBe(true)
       // Renew with the right revision works; a stale one loses.
-      const next = await renewSession(agentBus, session, rev as number, 1000)
+      const next = await renewSession(agentBus, T, session, rev as number, 1000)
       expect(next).not.toBeNull()
       expect(
-        await renewSession(agentBus, session, rev as number, 1000),
+        await renewSession(agentBus, T, session, rev as number, 1000),
       ).toBeNull()
       // Release → free again.
-      await releaseSession(agentBus, session)
-      expect(await isSessionRunning(agentBus, session)).toBe(false)
-      expect(await claimSession(agentBus, session, 1000)).not.toBeNull()
-      await releaseSession(agentBus, session)
+      await releaseSession(agentBus, T, session)
+      expect(await isSessionRunning(agentBus, T, session)).toBe(false)
+      expect(await claimSession(agentBus, T, session, 1000)).not.toBeNull()
+      await releaseSession(agentBus, T, session)
       await cleanup()
     })
 
@@ -1008,9 +1020,10 @@ export function runConformance(name: string, newPair: Factory): void {
       const session = `sess-lease-wrap-${Date.now()}`
       const first = await withSessionLease(
         agentBus,
+        T,
         session,
         async () => {
-          const second = await withSessionLease(agentBus, session, async () => {
+          const second = await withSessionLease(agentBus, T, session, async () => {
             throw new Error('should not run')
           })
           expect(second.acquired).toBe(false)
@@ -1019,8 +1032,48 @@ export function runConformance(name: string, newPair: Factory): void {
       )
       expect(first.acquired).toBe(true)
       expect(first.lost).toBe(false)
-      expect(await isSessionRunning(agentBus, session)).toBe(false)
+      expect(await isSessionRunning(agentBus, T, session)).toBe(false)
       await cleanup()
+    })
+
+    it('isolates tenants (mailbox, events, tools, files)', async () => {
+      const { agentBus, extensionBus, cleanup } = await newPair()
+      const ext = await serveConfExt(extensionBus)
+      try {
+        // Tool calls route by tenant: a tool only subscribed under its own
+        // tenant wildcard still receives both tenants' calls (shared
+        // extension), and each call carries the right tenant.
+        const a = new Agent(agentBus)
+        const tr1 = await a.callTool(T, 'sess-iso', 'conf-ext', 'session', 'c1', {})
+        const tr2 = await a.callTool(T2, 'sess-iso', 'conf-ext', 'session', 'c2', {})
+        expect(tr1.content).toBe('session=sess-iso')
+        expect(tr2.content).toBe('session=sess-iso')
+
+        // Mailbox isolation: a t2 publish is invisible to a t1-only consumer.
+        const received: MailboxMessageResolved[] = []
+        const cancel = await a.consumeMailbox(async msg => {
+          received.push(msg)
+        })
+        await sleep(50)
+        await a.publishMailbox(T, 'sess-mb-iso', 'user_prompt', { text: 'a' })
+        await sleep(200)
+        expect(received).toHaveLength(1)
+        expect(received[0]?.tenant).toBe(T)
+
+        // File dedup is per tenant: the same bytes under t1 must not resolve
+        // for t2.
+        const store = newFileStore(agentBus)
+        const bytes = new TextEncoder().encode('shared-bytes')
+        const sha = createHash('sha256').update(bytes).digest('hex')
+        await store.put(T, 'code-t1', { code: 'code-t1', sha256: sha, name: 'a.bin', mime: 'application/octet-stream', size: bytes.length, createdAt: '' }, bytes)
+        expect(await store.bySha(T, sha)).toBe('code-t1')
+        expect(await store.bySha(T2, sha)).toBeNull()
+
+        await cancel()
+      } finally {
+        await ext.close()
+        await cleanup()
+      }
     })
   })
 }

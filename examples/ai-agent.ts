@@ -65,6 +65,7 @@ async function discoverTools(agent: Agent): Promise<DiscoveredTool[]> {
 function buildAiTools(
   discovered: DiscoveredTool[],
   agent: Agent,
+  tenant: string,
   sessionName: string,
 ): Record<string, Tool> {
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- lazy
@@ -79,6 +80,7 @@ function buildAiTools(
       inputSchema: jsonSchema(t.inputSchema),
       execute: async (args, { toolCallId }) => {
         const result: ToolResult = await agent.callTool(
+          tenant,
           sessionName,
           t.extId,
           t.name,
@@ -124,8 +126,9 @@ function startProgressLoop(_agent: Agent, onProgress: (p: Record<string, unknown
 async function main(): Promise<void> {
   const bus = await connectNatsBus(url)
   const agent = new Agent(bus)
+  const tenant = process.env.ABC_TENANT ?? 'demo'
   const sessionName = `demo-${Date.now()}`
-  console.log(`[ai-agent] connected to ${url}, session=${sessionName}`)
+  console.log(`[ai-agent] connected to ${url}, tenant=${tenant}, session=${sessionName}`)
 
   const discovered = await discoverTools(agent)
   console.log(
@@ -147,7 +150,7 @@ async function main(): Promise<void> {
     // an API key, then listen on the mailbox for a while.
     const first = discovered[0]
     if (first !== undefined) {
-      const r = await agent.callTool(sessionName, first.extId, first.name, 'dry-1', {
+      const r = await agent.callTool(tenant, sessionName, first.extId, first.name, 'dry-1', {
         msg: 'hello',
       })
       console.log('[ai-agent] dry tool result:', JSON.stringify(r))
@@ -158,7 +161,7 @@ async function main(): Promise<void> {
     const { streamText } = await import('ai')
     const { createOpenAI } = await import('@ai-sdk/openai')
     const openai = createOpenAI({})
-    const tools = buildAiTools(discovered, agent, sessionName)
+    const tools = buildAiTools(discovered, agent, tenant, sessionName)
     const stream = streamText({
       model: openai('gpt-4o-mini'),
       system: 'You are a helpful assistant with tools on the ABC bus.',

@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "ABC Protocol",
-    "version": "0.1.0",
-    "description": "Agent Bus Communication Protocol — wire contract between an agent and extension servers. Generated from the zod schemas (@abc-protocol/sdk)."
+    "version": "2.0.0",
+    "description": "Agent Bus Communication Protocol — wire contract between an agent and extension servers. Generated from the zod schemas (@abc-protocol/sdk). v2 namespaces every data-plane channel as abc.<tenant>.<...> and carries tenant on every envelope."
   },
   "components": {
     "schemas": {
@@ -12,7 +12,10 @@
         "properties": {
           "v": {
             "type": "integer",
-            "default": 1
+            "default": 2
+          },
+          "tenant": {
+            "type": "string"
           },
           "ch": {
             "type": "string"
@@ -42,6 +45,7 @@
           }
         },
         "required": [
+          "tenant",
           "ch",
           "kind"
         ]
@@ -628,6 +632,9 @@
               "global",
               "session"
             ]
+          },
+          "tenant": {
+            "type": "string"
           },
           "session_name": {
             "type": "string"

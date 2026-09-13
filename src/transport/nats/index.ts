@@ -19,35 +19,50 @@ import type {
   InboxMsg,
   InboxPublishOpts,
   InboxSubscription,
+  PublishOpts,
   RequestOpts,
   SubscribeOpts,
   Subscription,
 } from '../../bus/index.js'
 import { authHeader, type Identity, verify } from '../../identity.js'
 import { EnvelopeSchema, sessionToken } from '../../protocol/index.js'
+import { subjectTenant } from '../../protocol/tenant.js'
 
 const STREAM_MAILBOX = 'ABC_MAILBOX'
 const STREAM_EVENTS = 'ABC_EVENTS'
 const STREAM_DLQ = 'ABC_DLQ'
-const INBOX_WILDCARD = 'abc.mailbox.>'
-const EVENTS_PREFIX = 'abc.session.events.'
-const DLQ_PREFIX = 'abc.dlq.'
+const MAILBOX_WILDCARD_ALL = 'abc.*.mailbox.>'
+const EVENTS_WILDCARD_ALL = 'abc.*.session.events.>'
+const DLQ_WILDCARD_ALL = 'abc.*.dlq.>'
 const OBJECT_BUCKET = 'ABC_TOOL'
 const OBJECT_BUCKET_PERSISTENT = 'ABC_FILES'
 
-// Two streams, two consumption models: the mailbox is a work queue
-// (competing consumers, ack on done), session events are a replayable
-// per-session log. Subjects are disjoint by design.
+/**
+ * Route a (possibly wildcard) subject to its stream by its v2 layout
+ * `abc.<tenant>.<area>...`:
+ *   - `abc.<t>.mailbox.<token>`        -> ABC_MAILBOX
+ *   - `abc.<t>.session.events.<token>` -> ABC_EVENTS
+ *   - `abc.<t>.dlq.<token>`            -> ABC_DLQ
+ * Wildcard consumers (`abc.*.mailbox.>` etc.) resolve the same way.
+ */
 function streamFor(subject: string): string {
-  if (subject.startsWith(EVENTS_PREFIX)) return STREAM_EVENTS
-  if (subject.startsWith(DLQ_PREFIX)) return STREAM_DLQ
+  const seg = subject.split('.')
+  if (seg[2] === 'session' && seg[3] === 'events') return STREAM_EVENTS
+  if (seg[2] === 'dlq') return STREAM_DLQ
   return STREAM_MAILBOX
 }
 
-// dlqSubjectFor maps an original queue subject to its dead-letter subject.
+/**
+ * Map a delivered data-plane subject to its tenant DLQ subject. Term() copies
+ * the raw message onto the dead-letter stream so a poison message can be
+ * requeued later; the tenant segment is preserved so the DLQ stays
+ * tenant-isolated.
+ */
 function dlqSubjectFor(subject: string): string {
+  const tenant = subjectTenant(subject)
   const token = subject.substring(subject.lastIndexOf('.') + 1)
-  return DLQ_PREFIX + token
+  if (tenant === null) return `abc.dlq.${token}`
+  return `abc.${tenant}.dlq.${token}`
 }
 
 export interface NatsConnectOptions {
@@ -76,46 +91,22 @@ async function ensureStreams(
   const jsm = await jetstreamManager(nc)
   const maxAge = opts.maxAgeMs ?? 24 * 3600 * 1_000_000_000
   const specs = [
-    { name: STREAM_MAILBOX, subjects: ['abc.mailbox.>'] },
-    { name: STREAM_EVENTS, subjects: ['abc.session.events.>'] },
-    { name: STREAM_DLQ, subjects: ['abc.dlq.>'] },
+    { name: STREAM_MAILBOX, subjects: [MAILBOX_WILDCARD_ALL] },
+    { name: STREAM_EVENTS, subjects: [EVENTS_WILDCARD_ALL] },
+    { name: STREAM_DLQ, subjects: [DLQ_WILDCARD_ALL] },
   ]
-  // Create in order; when the events stream overlaps a legacy mailbox
-  // stream (pre-.2), narrow the drifted stream first and retry.
   for (const s of specs) {
     let info: Awaited<ReturnType<typeof jsm.streams.info>> | undefined
     try {
       info = await jsm.streams.info(s.name)
     } catch {
-      try {
-        await jsm.streams.add({
-          name: s.name,
-          subjects: s.subjects,
-          max_age: maxAge,
-          ...(opts.replicas ? { num_replicas: opts.replicas } : {}),
-        })
-        continue
-      } catch (err) {
-        if (
-          s.name === STREAM_EVENTS &&
-          String(err).includes('subjects overlap')
-        ) {
-          const mi = await jsm.streams.info(STREAM_MAILBOX)
-          if (mi.config.subjects?.includes('abc.session.events.>')) {
-            await jsm.streams.update(STREAM_MAILBOX, {
-              subjects: ['abc.mailbox.>'],
-            })
-            await jsm.streams.add({
-              name: s.name,
-              subjects: s.subjects,
-              max_age: maxAge,
-              ...(opts.replicas ? { num_replicas: opts.replicas } : {}),
-            })
-            continue
-          }
-        }
-        throw err
-      }
+      await jsm.streams.add({
+        name: s.name,
+        subjects: s.subjects,
+        max_age: maxAge,
+        ...(opts.replicas ? { num_replicas: opts.replicas } : {}),
+      })
+      continue
     }
     // drift repair: subjects must match the desired set
     if (!sameSubjects(info.config.subjects, s.subjects)) {
@@ -130,10 +121,13 @@ function decode(m: { data: Uint8Array }): Envelope | null {
     string,
     unknown
   >
-  if (raw.v !== undefined && raw.v !== 1) {
+  // v2 is a breaking layout change: reject anything that is not v2 rather than
+  // misinterpreting the tenant segment as a session token.
+  if (raw.v !== undefined && raw.v !== 2) {
     console.warn(
-      `[abc] envelope version ${String(raw.v)} on ${String(raw.ch)} (this build speaks v1); fields may be misinterpreted`,
+      `[abc] rejecting envelope version ${String(raw.v)} on ${String(raw.ch)} (this build speaks v2)`,
     )
+    return null
   }
   const parsed = EnvelopeSchema.safeParse(raw)
   return parsed.success ? parsed.data : null
@@ -144,24 +138,42 @@ function encode(payload: unknown): Buffer {
 }
 
 // buildEnvelope assembles the wire envelope in one place. The optional
-// fields ride only when set, mirroring the zod optional() semantics.
+// fields ride only when set, mirroring the zod optional() semantics. `tenant`
+// is REQUIRED on the v2 wire (every data-plane and control-plane message is
+// attributed to a tenant).
 function buildEnvelope(
   kind: string,
   ch: string,
   payload: unknown,
+  tenant: string,
   opts: {
     id?: string | undefined
     sessionName?: string | undefined
     replyTo?: string | undefined
   } = {},
 ): Buffer {
-  const body: Record<string, unknown> = { v: 1, ch, kind, payload }
+  const body: Record<string, unknown> = {
+    v: 2,
+    ch,
+    kind,
+    tenant,
+    payload,
+  }
   if (opts.id !== undefined && opts.id !== '') body.id = opts.id
   if (opts.sessionName !== undefined && opts.sessionName !== '')
     body.session_name = opts.sessionName
   if (opts.replyTo !== undefined && opts.replyTo !== '')
     body.reply_to = opts.replyTo
   return encode(body)
+}
+
+/** Tenant of an outgoing message: explicit opt, else the subject segment. */
+function tenantOf(ch: string, explicit?: string): string {
+  const t = explicit ?? subjectTenant(ch)
+  if (t === null || t === undefined) {
+    throw new Error(`no tenant for subject ${ch} (pass opts.tenant)`)
+  }
+  return t
 }
 
 export class NatsBus implements Bus {
@@ -177,9 +189,11 @@ export class NatsBus implements Bus {
   ): void {
     if (this.idn === undefined) return
     const parsed = JSON.parse(Buffer.from(msg.data).toString('utf8')) as {
+      tenant?: string
       payload?: unknown
     }
     const h = authHeader(this.idn, {
+      tenant: parsed.tenant ?? '',
       ch: msg.subject,
       kind,
       id,
@@ -199,6 +213,7 @@ export class NatsBus implements Bus {
     const sig = m.headers?.get('abc-sig')
     if (sig === undefined || sig === '') return false
     const raw = JSON.parse(Buffer.from(m.data).toString('utf8')) as {
+      tenant?: string
       kind?: string
       id?: string
       payload?: unknown
@@ -207,6 +222,7 @@ export class NatsBus implements Bus {
       m.headers?.get('abc-id') ?? '',
       this.idn.secret,
       {
+        tenant: raw.tenant ?? '',
         ch: m.subject,
         kind: raw.kind ?? '',
         id: raw.id ?? '',
@@ -221,7 +237,7 @@ export class NatsBus implements Bus {
     payload: unknown,
     opts: RequestOpts = {},
   ): Promise<Envelope> {
-    const wire = buildEnvelope('req', ch, payload, {
+    const wire = buildEnvelope('req', ch, payload, tenantOf(ch, opts.tenant), {
       sessionName: opts.sessionName,
     })
     // timeoutMs > 0 bounds the request; 0/unset means "application bounds
@@ -251,24 +267,38 @@ export class NatsBus implements Bus {
     payload: unknown,
     opts: RequestOpts = {},
   ): Promise<Envelope[]> {
-    const replies = await this.nc.requestMany(
-      ch,
-      encode({ v: 1, ch, kind: 'req', payload }),
-      {
-        strategy: 'timer',
-        maxWait: opts.maxWaitMs ?? 500,
-      },
-    )
+    const wire = buildEnvelope('req', ch, payload, tenantOf(ch, opts.tenant))
+    const reqOpts: { strategy: 'timer'; maxWait: number; headers?: MsgHdrs } = {
+      strategy: 'timer',
+      maxWait: opts.maxWaitMs ?? 500,
+    }
+    if (this.idn !== undefined) {
+      const msg: { subject: string; data: Uint8Array; headers?: MsgHdrs } = {
+        subject: ch,
+        data: wire,
+      }
+      this.signMsg(msg, 'req', '')
+      if (msg.headers !== undefined) reqOpts.headers = msg.headers
+    }
+    const replies = await this.nc.requestMany(ch, wire, reqOpts)
     const out: Envelope[] = []
     for await (const m of replies) {
+      if (this.idn !== undefined && !this.verifyMsg(m)) continue
       const env = decode(m)
       if (env !== null) out.push(env)
     }
     return out
   }
 
-  async publish(ch: string, payload: unknown, replyTo?: string): Promise<void> {
-    const data = buildEnvelope('pub', ch, payload, { replyTo })
+  async publish(
+    ch: string,
+    payload: unknown,
+    opts: PublishOpts = {},
+  ): Promise<void> {
+    const replyTo = opts.replyTo
+    const data = buildEnvelope('pub', ch, payload, tenantOf(ch, opts.tenant), {
+      replyTo,
+    })
     if (this.idn !== undefined) {
       const msg: { subject: string; data: Uint8Array; headers?: MsgHdrs } = {
         subject: ch,
@@ -348,21 +378,30 @@ export class NatsBus implements Bus {
     opts: InboxPublishOpts,
   ): Promise<void> {
     const js = jetstream(this.nc)
-    const wire = buildEnvelope('queue', ch, payload, {
-      id: opts.id,
-      sessionName: opts.sessionName,
-    })
+    const wire = buildEnvelope(
+      'queue',
+      ch,
+      payload,
+      tenantOf(ch, opts.tenant),
+      {
+        id: opts.id,
+        sessionName: opts.sessionName,
+      },
+    )
     await js.publish(ch, wire, { msgID: opts.id })
   }
 
   async inboxConsume(opts?: InboxConsumeOpts): Promise<InboxSubscription> {
     const jsm = await jetstreamManager(this.nc)
-    const subject = opts?.subject ?? INBOX_WILDCARD
+    const subject = opts?.subject ?? MAILBOX_WILDCARD_ALL
     // A durable consumer's filter subject is fixed at creation, so each
     // distinct subject needs its own durable name (else re-binding a shared
-    // durable to a different filter silently delivers nothing).
+    // durable to a different filter silently delivers nothing). The cross-
+    // tenant mailbox wildcard uses one shared durable (single-consumer,
+    // app-layer tenant dispatch); any other subject is keyed by its token
+    // (which already embeds the tenant).
     const durable =
-      subject === INBOX_WILDCARD
+      subject === MAILBOX_WILDCARD_ALL
         ? 'abc-mailbox-push'
         : `abc-mailbox-push-${sessionToken(subject)}`
     await jsm.consumers

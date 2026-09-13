@@ -66,9 +66,9 @@ export function generateOpenApi(): Record<string, unknown> {
     openapi: '3.1.0',
     info: {
       title: 'ABC Protocol',
-      version: '0.1.0',
+      version: '2.0.0',
       description:
-        'Agent Bus Communication Protocol — wire contract between an agent and extension servers. Generated from the zod schemas (@abc-protocol/sdk).',
+        'Agent Bus Communication Protocol — wire contract between an agent and extension servers. Generated from the zod schemas (@abc-protocol/sdk). v2 namespaces every data-plane channel as abc.<tenant>.<...> and carries tenant on every envelope.',
     },
   }) as unknown as Record<string, unknown>
 }

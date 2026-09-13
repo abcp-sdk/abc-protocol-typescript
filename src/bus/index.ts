@@ -9,6 +9,8 @@ export type RequestOpts = {
   maxWaitMs?: number
   /** Rides the envelope's first-class session_name field. */
   sessionName?: string
+  /** Rides the envelope's first-class tenant field (required on data-plane). */
+  tenant?: string
 }
 
 export type SubscribeOpts = {
@@ -21,11 +23,20 @@ export type InboxConsumeOpts = {
   subject?: string
 }
 
+export type PublishOpts = {
+  /** Rides the envelope's first-class tenant field. */
+  tenant?: string
+  /** Transport-internal reply address (set by request handling). */
+  replyTo?: string
+}
+
 export type InboxPublishOpts = {
   /** Publisher-side idempotency key (also the message id). */
   id: string
   /** Rides the envelope's session_name so the consumer routes to the session. */
   sessionName?: string
+  /** Rides the envelope's first-class tenant field. */
+  tenant?: string
 }
 
 /** A live subscription handle; yields envelopes as they arrive. */
@@ -79,7 +90,7 @@ export interface Bus {
   ): Promise<Envelope[]>
 
   /** Fire-and-forget publish. No reply address. */
-  publish(ch: string, payload: unknown): Promise<void>
+  publish(ch: string, payload: unknown, opts?: PublishOpts): Promise<void>
 
   /** Live subscription (opts.queue enables a competing queue group). */
   subscribe(ch: string, opts?: SubscribeOpts): Promise<Subscription>

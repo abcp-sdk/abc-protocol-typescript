@@ -45,6 +45,7 @@ export const ConfigSetSchema = z.object({
     .optional(),
   revision: z.number().int(),
   scope: z.enum(['global', 'session']),
+  tenant: z.string().optional(),
   session_name: z.string().optional(),
   /** Require an explicit ack (HookResponse) from the extension. */
   ack: z.boolean().default(true),

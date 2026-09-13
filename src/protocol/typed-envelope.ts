@@ -42,16 +42,21 @@ export type NamedPayload = {
   >
 }
 
+/**
+ * Channel patterns for the v2 tenant-namespaced layout. Data-plane channels
+ * are `abc.<tenant>.<rest>`; the tenant segment therefore shifts every
+ * subsequent segment by one. The global `abc.discover` has no tenant segment.
+ */
 const Patterns = {
   discover: /^abc\.discover$/,
-  toolCall: /^abc\.tool\.call\./,
-  variable: /^abc\.var\./,
-  hookCall: /^abc\.hook\.call\./,
-  mailbox: /^abc\.mailbox\./,
-  interrupt: /^abc\.ctl\.interrupt\./,
-  hookEvent: /^abc\.hook\.event\./,
-  toolProgress: /^abc\.tool\.progress\./,
-  config: /^abc\.config\.(get\.)?[^.]+$/,
+  toolCall: /^abc\.[^.]+\.tool\.call\./,
+  variable: /^abc\.[^.]+\.var\./,
+  hookCall: /^abc\.[^.]+\.hook\.call\./,
+  mailbox: /^abc\.[^.]+\.mailbox\./,
+  interrupt: /^abc\.[^.]+\.ctl\.interrupt\./,
+  hookEvent: /^abc\.[^.]+\.hook\.event\./,
+  toolProgress: /^abc\.[^.]+\.tool\.progress\./,
+  config: /^abc\.[^.]+\.config\.(get\.)?[^.]+$/,
 } as const
 
 /** Resolve the concrete payload schema for a named channel, or null (ephemeral). */
@@ -64,8 +69,10 @@ export function namedPayloadSchema(ch: string): z.ZodType | null {
   if (Patterns.interrupt.test(ch)) return NamedPayloadSchema.interrupt
   if (Patterns.hookEvent.test(ch)) return NamedPayloadSchema.hookEvent
   if (Patterns.toolProgress.test(ch)) return NamedPayloadSchema.toolProgress
-  if (ch.startsWith('abc.config.get.')) return ConfigSnapshotSchema
-  if (ch.startsWith('abc.config.')) return NamedPayloadSchema.configSet
+  if (ch.startsWith('abc.') && ch.includes('.config.get.')) {
+    return ConfigSnapshotSchema
+  }
+  if (Patterns.config.test(ch)) return NamedPayloadSchema.configSet
   return null
 }
 

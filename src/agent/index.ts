@@ -1,4 +1,4 @@
-import type { Bus } from '../bus/index.js'
+import type { Bus, PublishOpts } from '../bus/index.js'
 import {
   PRESENCE_BUCKET,
   sessionVarKey,
@@ -17,11 +17,18 @@ import {
   HookResponseSchema,
   type InterruptSignal,
   MAILBOX_CONSUME,
+  DLQ_CONSUME,
   MailboxMessageSchema,
   type ObjectRef,
   ToolResultSchema,
 } from '../protocol/index.js'
 import { escapeKVSegment } from '../protocol/kv-escaping.js'
+import {
+  GLOBAL_TENANT,
+  subjectTenant,
+  tenantKVKey,
+  tenantObjectName,
+} from '../protocol/tenant.js'
 import { type AgentConnect, connectBus } from '../transport/index.js'
 
 export interface ToolResultResolved {
@@ -34,6 +41,7 @@ export interface ToolResultResolved {
 
 export interface MailboxMessageResolved {
   id: string
+  tenant: string
   sessionName: string
   type: string
   payload?: unknown
@@ -52,31 +60,40 @@ export interface ServeConfigOptions {
 
 const CONFIG_KV_BUCKET = 'cfg'
 
+/**
+ * Tenant-scoped config KV key. Mirrors the extension SDK's key layout:
+ *   global  -> t.<tenant>.<extId>.<name>
+ *   session -> t.<tenant>.<extId>.<escapedSession>.<name>
+ */
 function kvKey(
+  tenant: string,
   extId: string,
   scope: string,
   sessionName: string,
   name: string,
 ): string {
-  return scope === 'session'
-    ? `${extId}.${escapeKVSegment(sessionName)}.${name}`
-    : `${extId}.${name}`
+  const rest =
+    scope === 'session'
+      ? `${extId}.${escapeKVSegment(sessionName)}.${name}`
+      : `${extId}.${name}`
+  return tenantKVKey(tenant, rest)
 }
 
 /**
  * Agent-side config authority. Values live in memory (serving snapshot reqs),
  * mirror into the KV `cfg` bucket when the transport supports KV, and are
- * delivered to extensions as 1:1 `req`s with an optional ack.
+ * delivered to extensions as 1:1 `req`s with an optional ack. State is keyed
+ * by tenant → extId → config name.
  */
 class ConfigAuthority {
-  /** extId -> declared items (from the last discovered manifest). */
-  private declarations = new Map<string, ExtensionConfigItem[]>()
-  /** extId -> (config name -> [revision, value]). */
-  private global = new Map<string, Map<string, [number, unknown]>>()
-  /** extId -> (session -> (name -> [revision, value])). */
+  /** tenant -> extId -> declared items (from the last discovered manifest). */
+  private declarations = new Map<string, Map<string, ExtensionConfigItem[]>>()
+  /** tenant -> extId -> (config name -> [revision, value]). */
+  private global = new Map<string, Map<string, Map<string, [number, unknown]>>>()
+  /** tenant -> extId -> (session -> (name -> [revision, value])). */
   private sessions = new Map<
     string,
-    Map<string, Map<string, [number, unknown]>>
+    Map<string, Map<string, Map<string, [number, unknown]>>>
   >()
   private unsub?: () => Promise<void>
 
@@ -86,9 +103,10 @@ class ConfigAuthority {
   ) {}
 
   async start(): Promise<void> {
-    // Recover persisted values.
-    for (const extId of this.declarations.keys()) {
-      await this.recover(extId)
+    for (const [tenant, extMap] of this.declarations) {
+      for (const extId of extMap.keys()) {
+        await this.recover(tenant, extId)
+      }
     }
     // Snapshot serving moved to the cfg KV bucket (0.2): extensions
     // recover state by reading/watching it; no abc.config.get serving.
@@ -100,27 +118,33 @@ class ConfigAuthority {
   }
 
   /** Record declarations from a manifest; recovers persisted state once. */
-  declare(manifest: ExtensionManifest): void {
-    this.declarations.set(manifest.id, manifest.config ?? [])
-    void this.recover(manifest.id)
+  declare(tenant: string, manifest: ExtensionManifest): void {
+    let extMap = this.declarations.get(tenant)
+    if (extMap === undefined) {
+      extMap = new Map()
+      this.declarations.set(tenant, extMap)
+    }
+    extMap.set(manifest.id, manifest.config ?? [])
+    void this.recover(tenant, manifest.id)
   }
 
-  private async recover(extId: string): Promise<void> {
-    const items = this.declarations.get(extId) ?? []
+  private async recover(tenant: string, extId: string): Promise<void> {
+    const items = this.declarations.get(tenant)?.get(extId) ?? []
     for (const item of items) {
       const raw = await this.bus.kvGet(
         CONFIG_KV_BUCKET,
-        kvKey(extId, 'global', '', item.name),
+        kvKey(tenant, extId, 'global', '', item.name),
       )
       if (raw !== null) {
         // envelope {r, v} with a bare-value fallback (pre-0.2 entries)
         const parsed = JSON.parse(raw) as { r?: number; v?: unknown }
         if (parsed !== null && typeof parsed === 'object' && 'v' in parsed) {
-          this.global
-            .get(extId)
-            ?.set(item.name, [Number(parsed.r ?? 0), parsed.v])
+          this.globalFor(tenant, extId).set(item.name, [
+            Number(parsed.r ?? 0),
+            parsed.v,
+          ])
         } else {
-          this.global.get(extId)?.set(item.name, [0, parsed])
+          this.globalFor(tenant, extId).set(item.name, [0, parsed])
         }
       }
     }
@@ -128,12 +152,45 @@ class ConfigAuthority {
     // keeps recovery global-only (documented) because KV lacks listing here.
   }
 
-  private snapshot(extId: string): z_infer_ConfigSnapshot {
+  private globalFor(
+    tenant: string,
+    extId: string,
+  ): Map<string, [number, unknown]> {
+    let extMap = this.global.get(tenant)
+    if (extMap === undefined) {
+      extMap = new Map()
+      this.global.set(tenant, extMap)
+    }
+    let m = extMap.get(extId)
+    if (m === undefined) {
+      m = new Map()
+      extMap.set(extId, m)
+    }
+    return m
+  }
+
+  private sessionsFor(
+    tenant: string,
+    extId: string,
+  ): Map<string, Map<string, [number, unknown]>> {
+    let extMap = this.sessions.get(tenant)
+    if (extMap === undefined) {
+      extMap = new Map()
+      this.sessions.set(tenant, extMap)
+    }
+    let m = extMap.get(extId)
+    if (m === undefined) {
+      m = new Map()
+      extMap.set(extId, m)
+    }
+    return m
+  }
+
+  private snapshot(tenant: string, extId: string): z_infer_ConfigSnapshot {
     const g: Record<string, unknown> = {}
-    for (const [name, [, value]] of this.global.get(extId) ?? [])
-      g[name] = value
+    for (const [name, [, value]] of this.globalFor(tenant, extId)) g[name] = value
     const sessions: Record<string, Record<string, unknown>> = {}
-    for (const [sess, vals] of this.sessions.get(extId) ?? []) {
+    for (const [sess, vals] of this.sessionsFor(tenant, extId)) {
       const rec: Record<string, unknown> = {}
       for (const [name, [, value]] of vals) rec[name] = value
       sessions[sess] = rec
@@ -148,12 +205,13 @@ class ConfigAuthority {
    */
   async set(
     manifest: ExtensionManifest,
+    tenant: string,
     name: string,
     value: unknown,
     sessionName?: string,
     ack?: boolean,
   ): Promise<void> {
-    const items = this.declarations.get(manifest.id)
+    const items = this.declarations.get(tenant)?.get(manifest.id)
     const item = items?.find(c => c.name === name)
     if (item === undefined) {
       const err: ConfigError = {
@@ -175,29 +233,27 @@ class ConfigAuthority {
 
     const useAck = ack ?? this.defaultAck ?? true
 
-    // Bump revision (per ext/scope/session/name key).
+    // Bump revision (per tenant/ext/scope/session/name key).
     let revision: number
     if (scope === 'global') {
-      const m = this.global.get(manifest.id) ?? new Map()
+      const m = this.globalFor(tenant, manifest.id)
       const prev = m.get(name)?.[0] ?? 0
       revision = prev + 1
       m.set(name, [revision, value])
-      this.global.set(manifest.id, m)
     } else {
-      const sess = this.sessions.get(manifest.id) ?? new Map()
+      const sess = this.sessionsFor(tenant, manifest.id)
       const vals = sess.get(sessionName as string) ?? new Map()
       const prev = vals.get(name)?.[0] ?? 0
       revision = prev + 1
       vals.set(name, [revision, value])
       sess.set(sessionName as string, vals)
-      this.sessions.set(manifest.id, sess)
     }
 
     // Persist first (crash-safe): the cfg KV bucket is the source of truth;
     // the revision rides along so a restarted agent restores counters.
     await this.bus.kvPut(
       CONFIG_KV_BUCKET,
-      kvKey(manifest.id, scope, sessionName ?? '', name),
+      kvKey(tenant, manifest.id, scope, sessionName ?? '', name),
       JSON.stringify({ r: revision, v: value }),
       0,
     )
@@ -205,16 +261,18 @@ class ConfigAuthority {
     // Deliver as 1:1 req with optional ack.
     const reqOpts: import('../bus/index.js').RequestOpts = {
       timeoutMs: useAck ? 5000 : 300,
+      tenant,
     }
     if (sessionName !== undefined) reqOpts.sessionName = sessionName
     const reply = await this.bus
       .request(
-        CH.config(manifest.id),
+        CH.config(tenant, manifest.id),
         {
           name,
           value,
           revision,
           scope,
+          tenant,
           ...(sessionName !== undefined ? { session_name: sessionName } : {}),
           ack: useAck,
         },
@@ -231,18 +289,20 @@ class ConfigAuthority {
     if (parsed.success && !parsed.data.ok) {
       // Roll back memory + KV.
       if (scope === 'global') {
-        const m = this.global.get(manifest.id)
-        const prev = m?.get(name)
-        if (prev !== undefined && prev[0] === revision) m?.delete(name)
+        const m = this.globalFor(tenant, manifest.id)
+        const prev = m.get(name)
+        if (prev !== undefined && prev[0] === revision) m.delete(name)
       } else {
-        const vals = this.sessions.get(manifest.id)?.get(sessionName as string)
+        const vals = this.sessionsFor(tenant, manifest.id).get(
+          sessionName as string,
+        )
         const prev = vals?.get(name)
         if (prev !== undefined && prev[0] === revision) vals?.delete(name)
       }
       await this.bus
         .kvDelete(
           CONFIG_KV_BUCKET,
-          kvKey(manifest.id, scope, sessionName ?? '', name),
+          kvKey(tenant, manifest.id, scope, sessionName ?? '', name),
         )
         .catch(() => {})
       throw {
@@ -254,18 +314,22 @@ class ConfigAuthority {
   }
 
   /** Drop session overrides when a session ends. */
-  async dropSession(manifestId: string, sessionName: string): Promise<void> {
-    const vals = this.sessions.get(manifestId)?.get(sessionName)
+  async dropSession(
+    tenant: string,
+    manifestId: string,
+    sessionName: string,
+  ): Promise<void> {
+    const vals = this.sessionsFor(tenant, manifestId).get(sessionName)
     if (vals === undefined) return
     for (const name of vals.keys()) {
       await this.bus
         .kvDelete(
           CONFIG_KV_BUCKET,
-          kvKey(manifestId, 'session', sessionName, name),
+          kvKey(tenant, manifestId, 'session', sessionName, name),
         )
         .catch(() => {})
     }
-    this.sessions.get(manifestId)?.delete(sessionName)
+    this.sessionsFor(tenant, manifestId).delete(sessionName)
   }
 }
 
@@ -349,12 +413,13 @@ export class Agent {
   }
 
   /**
-   * Set a config value on an extension. Validates against the manifest
-   * declaration (so discover() must have run, or pass the manifest), persists
-   * via the KV mirror, and delivers with an ack; a rejection from the
+   * Set a tenant's config value on an extension. Validates against the
+   * manifest declaration (so discover() must have run, or pass the manifest),
+   * persists via the KV mirror, and delivers with an ack; a rejection from the
    * extension rolls the value back and throws ConfigRejected.
    */
   async setConfig(
+    tenant: string,
     extId: string,
     name: string,
     value: unknown,
@@ -368,18 +433,29 @@ export class Agent {
         message: `no manifest for ${extId}; run discover() first`,
       } satisfies ConfigError
     }
-    this.configAuthority?.declare(manifest)
+    this.configAuthority?.declare(tenant, manifest)
     if (this.configAuthority === undefined) {
       this.configAuthority = new ConfigAuthority(this.bus, true)
-      this.configAuthority.declare(manifest)
+      this.configAuthority.declare(tenant, manifest)
       await this.configAuthority.start()
     }
-    await this.configAuthority.set(manifest, name, value, sessionName, opts.ack)
+    await this.configAuthority.set(
+      manifest,
+      tenant,
+      name,
+      value,
+      sessionName,
+      opts.ack,
+    )
   }
 
-  /** Drop per-session config overrides when a session ends. */
-  async dropSessionConfig(extId: string, sessionName: string): Promise<void> {
-    await this.configAuthority?.dropSession(extId, sessionName)
+  /** Drop a tenant's per-session config overrides when a session ends. */
+  async dropSessionConfig(
+    tenant: string,
+    extId: string,
+    sessionName: string,
+  ): Promise<void> {
+    await this.configAuthority?.dropSession(tenant, extId, sessionName)
   }
 
   get rawBus(): Bus {
@@ -390,11 +466,15 @@ export class Agent {
     // Presence-first: extensions heartbeat manifests into the abc-presence
     // KV bucket; the watcher keeps the cache live (offline extensions drop
     // out via key TTL). Only a cold cache falls back to the broadcast.
+    // Discovery is GLOBAL: every extension serves every tenant.
     await this.ensurePresence()
     if (this.manifestCache.size > 0) {
       return [...this.manifestCache.values()]
     }
-    const replies = await this.bus.requestMany(CH.DISCOVER, {}, { maxWaitMs })
+    const replies = await this.bus.requestMany(CH.DISCOVER, {}, {
+      maxWaitMs,
+      tenant: GLOBAL_TENANT,
+    })
     const out: ExtensionManifest[] = []
     const seen = new Set<string>()
     for (const r of replies) {
@@ -441,6 +521,7 @@ export class Agent {
   }
 
   async callTool(
+    tenant: string,
     sessionName: string,
     extId: string,
     tool: string,
@@ -448,9 +529,9 @@ export class Agent {
     args: Record<string, unknown>,
   ): Promise<ToolResultResolved> {
     const reply = await this.bus.request(
-      CH.toolCall(extId, tool),
+      CH.toolCall(tenant, extId, tool),
       { call_id: callId, arguments: args },
-      { timeoutMs: 0, sessionName },
+      { timeoutMs: 0, sessionName, tenant },
     )
     const parsed = ToolResultSchema.safeParse(reply.payload)
     if (!parsed.success) return {}
@@ -469,11 +550,12 @@ export class Agent {
    * returned subscription yields progress envelopes; the orchestration layer
    * uses these for liveness/UI, never for the LLM context.
    */
-  async subscribeProgress(callId: string) {
-    return this.bus.subscribe(CH.toolProgress(callId))
+  async subscribeProgress(tenant: string, callId: string) {
+    return this.bus.subscribe(CH.toolProgress(tenant, callId))
   }
 
   async resolveVariable(
+    tenant: string,
     provider: string,
     name: string,
     sessionName?: string,
@@ -482,19 +564,19 @@ export class Agent {
     // cached hit avoids the lazy resolver round trip entirely.
     if (sessionName !== undefined && sessionName !== '') {
       const cached = await this.bus
-        .kvGet(VARS_BUCKET, sessionVarKey(provider, sessionName, name))
+        .kvGet(VARS_BUCKET, sessionVarKey(tenant, provider, sessionName, name))
         .catch(() => null)
       if (cached !== null && cached !== '') return cached
     }
     const cachedGlobal = await this.bus
-      .kvGet(VARS_BUCKET, varKey(provider, name))
+      .kvGet(VARS_BUCKET, varKey(tenant, provider, name))
       .catch(() => null)
     if (cachedGlobal !== null && cachedGlobal !== '') return cachedGlobal
     try {
       const reply = await this.bus.request(
-        CH.variable(provider, name),
+        CH.variable(tenant, provider, name),
         { name },
-        sessionName === undefined ? {} : { sessionName },
+        sessionName === undefined ? { tenant } : { sessionName, tenant },
       )
       const parsed = ExtensionVariableValueSchema.safeParse(reply.payload)
       return parsed.success ? parsed.data.value : null
@@ -504,15 +586,16 @@ export class Agent {
   }
 
   async publishMailbox(
+    tenant: string,
     sessionName: string,
     type: string,
     payload: unknown,
   ): Promise<void> {
     const id = crypto.randomUUID()
     await this.bus.inboxPublish(
-      CH.mailbox(sessionName),
+      CH.mailbox(tenant, sessionName),
       { id, type, payload },
-      { id, sessionName },
+      { id, sessionName, tenant },
     )
   }
 
@@ -532,14 +615,16 @@ export class Agent {
         }
         const p = parsed.data
         const sessionName = msg.session_name ?? ''
+        const tenant = msg.tenant ?? subjectTenant(msg.ch ?? '') ?? ''
         const id = typeof msg.id === 'string' ? msg.id : ''
-        if (sessionName === '' || id === '') {
+        if (sessionName === '' || id === '' || tenant === '') {
           await msg.ack()
           continue
         }
         try {
           await handler({
             id,
+            tenant,
             sessionName,
             type: p.type ?? 'event',
             payload: p.payload,
@@ -573,19 +658,21 @@ export class Agent {
    * mailbox with a fresh id, acking the dead-letter copy. The return path
    * for triage: fix the consumer, then requeue the parked payloads. */
   async requeueDLQ(id: string, timeoutMs = 10_000): Promise<boolean> {
-    const sub = await this.bus.inboxConsume({ subject: 'abc.dlq.>' })
+    const sub = await this.bus.inboxConsume({ subject: DLQ_CONSUME })
     const deadline = Date.now() + timeoutMs
     try {
       for await (const msg of sub) {
         if (Date.now() >= deadline) return false
         const parsed = MailboxMessageSchema.safeParse(msg.payload)
         const sessionName = msg.session_name ?? ''
+        const tenant = msg.tenant ?? subjectTenant(msg.ch ?? '') ?? ''
         const mid = typeof msg.id === 'string' ? msg.id : ''
-        if (!parsed.success || sessionName === '' || mid !== id) {
+        if (!parsed.success || sessionName === '' || mid !== id || tenant === '') {
           await msg.nak(500).catch(() => {})
           continue
         }
         await this.publishMailbox(
+          tenant,
           sessionName,
           parsed.data.type ?? 'event',
           parsed.data.payload,
@@ -601,6 +688,7 @@ export class Agent {
 
   /** Fire a sync call-hook; returns false when it failed. */
   async callHook(
+    tenant: string,
     sessionName: string,
     extId: string,
     hook: string,
@@ -610,11 +698,16 @@ export class Agent {
     error?: { code: string; message: string }
     data?: unknown
   }> {
-    const reply = await this.bus.request(CH.hookCall(extId, hook), {
-      hook,
-      session_name: sessionName,
-      arguments: args,
-    })
+    const reply = await this.bus.request(
+      CH.hookCall(tenant, extId, hook),
+      {
+        hook,
+        tenant,
+        session_name: sessionName,
+        arguments: args,
+      },
+      { tenant },
+    )
     const parsed = HookResponseSchema.safeParse(reply.payload)
     if (!parsed.success) {
       return { ok: false, error: { code: 'internal', message: 'no reply' } }
@@ -631,16 +724,18 @@ export class Agent {
 
   /** Fire an async event-hook (best-effort). */
   async publishEventHook(
+    tenant: string,
     sessionName: string,
     hook: string,
     payload?: unknown,
   ): Promise<void> {
     const ev: HookEvent = { hook, session_name: sessionName, payload }
-    await this.bus.publish(CH.hookEvent(hook), ev)
+    await this.bus.publish(CH.hookEvent(tenant, hook), ev, { tenant })
   }
 
   /** Ask an extension to interrupt in-flight work for a session. */
   async interrupt(
+    tenant: string,
     extId: string,
     sessionName?: string,
     reason?: string,
@@ -648,17 +743,18 @@ export class Agent {
     const sig: InterruptSignal = {}
     if (sessionName !== undefined) sig.session_name = sessionName
     if (reason !== undefined) sig.reason = reason
-    await this.bus.publish(CH.interrupt(extId), sig)
+    await this.bus.publish(CH.interrupt(tenant, extId), sig, { tenant })
   }
 
   /**
-   * Announce a session lifecycle change on abc.session.lifecycle.<kind>
-   * (created / forked / renamed / deleted). forked carries parent, renamed
-   * carries from/to. Extensions that declared the kind receive it; on
-   * "deleted" this also drops the session's config overrides for every
-   * known extension.
+   * Announce a session lifecycle change on
+   * abc.<tenant>.session.lifecycle.<kind> (created / forked / renamed /
+   * deleted). forked carries parent, renamed carries from/to. Extensions that
+   * declared the kind receive it; on "deleted" this also drops the session's
+   * config overrides for every known extension.
    */
   async publishLifecycleEvent(
+    tenant: string,
     kind: 'created' | 'forked' | 'renamed' | 'deleted',
     sessionName: string,
     opts: {
@@ -670,6 +766,7 @@ export class Agent {
   ): Promise<void> {
     const body: Record<string, unknown> = {
       kind,
+      tenant,
       session_name: sessionName,
     }
     if (kind === 'forked' && opts.parent !== undefined)
@@ -679,10 +776,10 @@ export class Agent {
       if (opts.to !== undefined) body.to = opts.to
     }
     if (opts.payload !== undefined) body.payload = opts.payload
-    await this.bus.publish(`abc.session.lifecycle.${kind}`, body)
+    await this.bus.publish(CH.lifecycle(tenant, kind), body, { tenant })
     if (kind === 'deleted') {
       for (const extId of this.manifestCache.keys()) {
-        await this.dropSessionConfig(extId, sessionName).catch(() => {})
+        await this.dropSessionConfig(tenant, extId, sessionName).catch(() => {})
       }
     }
   }
@@ -690,18 +787,20 @@ export class Agent {
   async consumeDLQ(
     handler: (msg: MailboxMessageResolved) => void | Promise<void>,
   ): Promise<() => Promise<void>> {
-    const sub = await this.bus.inboxConsume({ subject: 'abc.dlq.>' })
+    const sub = await this.bus.inboxConsume({ subject: DLQ_CONSUME })
     void (async () => {
       for await (const msg of sub) {
         const parsed = MailboxMessageSchema.safeParse(msg.payload)
         const sessionName = msg.session_name ?? ''
-        if (!parsed.success || sessionName === '') {
+        const tenant = msg.tenant ?? subjectTenant(msg.ch ?? '') ?? ''
+        if (!parsed.success || sessionName === '' || tenant === '') {
           await msg.termNoDLQ()
           continue
         }
         try {
           await handler({
             id: msg.id ?? '',
+            tenant,
             sessionName,
             type: parsed.data.type ?? 'event',
             payload: parsed.data.payload,
@@ -715,19 +814,23 @@ export class Agent {
     return () => sub.close()
   }
 
-  async putObject(name: string, data: Uint8Array): Promise<void> {
-    return this.bus.objectPut(name, data)
+  async putObject(
+    tenant: string,
+    name: string,
+    data: Uint8Array,
+  ): Promise<void> {
+    return this.bus.objectPut(tenantObjectName(tenant, name), data)
   }
 
-  async getObject(name: string): Promise<Uint8Array | null> {
-    return this.bus.objectGet(name)
+  async getObject(tenant: string, name: string): Promise<Uint8Array | null> {
+    return this.bus.objectGet(tenantObjectName(tenant, name))
   }
 
   /**
-   * Stream a session's events (abc.session.events.<token>) over ONE ordered
-   * subscription: first the retained history from `startTimeMs` (or from now
-   * when omitted), then live events — no polling, no replay/live handover
-   * race. Yields raw `{event, params?, eid?}` items.
+   * Stream a session's events (abc.<tenant>.session.events.<token>) over ONE
+   * ordered subscription: first the retained history from `startTimeMs` (or
+   * from now when omitted), then live events — no polling, no replay/live
+   * handover race. Yields raw `{event, params?, eid?}` items.
    *
    * CATCH-UP COALESCING: while the consumer is behind (`envelope.pending > 0`)
    * consecutive deltas of the same part (`reasoning-delta` / `text-delta`, same
@@ -738,11 +841,12 @@ export class Agent {
    * deltas are streamed one-by-one so live typing stays incremental.
    */
   async *streamEvents(
+    tenant: string,
     sessionName: string,
     opts?: { startTimeMs?: number },
   ): AsyncGenerator<{ event: string; params?: unknown; eid?: string }> {
     const sub = await this.bus.subscribeStream(
-      CH.sessionEvents(sessionName),
+      CH.sessionEvents(tenant, sessionName),
       opts,
     )
     const isDelta = (e: string) => e === 'reasoning-delta' || e === 'text-delta'

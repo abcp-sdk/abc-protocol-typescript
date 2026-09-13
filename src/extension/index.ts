@@ -20,9 +20,29 @@ import {
 } from '../protocol/index.js'
 import { validateJsonSchema } from '../protocol/jsonschema.js'
 import { unescapeKVSegment } from '../protocol/kv-escaping.js'
+import {
+  GLOBAL_TENANT,
+  subjectTenant,
+  tenantKVKey,
+  tenantObjectName,
+} from '../protocol/tenant.js'
 import { connectBus, type ExtensionConnect } from '../transport/index.js'
 
 const OFFLOAD_THRESHOLD = 256 * 1024
+
+/** Data-plane subject wildcards an extension subscribes to (ignore tenant). */
+const WILDCARD = {
+  discover: 'abc.discover',
+  toolCall: (extId: string, tool: string) =>
+    `abc.*.tool.call.${extId}.${tool}`,
+  variable: (extId: string, name: string) => `abc.*.var.${extId}.${name}`,
+  hookCall: (extId: string, hook: string) =>
+    `abc.*.hook.call.${extId}.${hook}`,
+  hookEvent: (hook: string) => `abc.*.hook.event.${hook}`,
+  interrupt: (extId: string) => `abc.*.ctl.interrupt.${extId}`,
+  lifecycle: 'abc.*.session.lifecycle.>',
+  config: (extId: string) => `abc.*.config.${extId}`,
+} as const
 
 export interface ToolSpec {
   description: string
@@ -40,6 +60,7 @@ export interface ToolSpec {
     callId: string,
     sessionName: string,
     signal?: AbortSignal,
+    tenant?: string,
   ): Promise<ToolResultData | undefined>
 }
 
@@ -53,7 +74,7 @@ export interface VariableSpec {
   description?: string
   descriptions?: Record<string, string>
   scope?: 'global' | 'session'
-  resolve?: (sessionName?: string) => Promise<string> | string
+  resolve?: (sessionName?: string, tenant?: string) => Promise<string> | string
 }
 
 export interface ConfigSpec {
@@ -90,22 +111,28 @@ export interface ExtensionConfig {
     hook: string,
     sessionName: string,
     args?: Record<string, unknown>,
+    tenant?: string,
   ) => Promise<{ ok: boolean; error?: ErrorPayload; data?: unknown }>
   /** Async event-hook (pub); best-effort. */
   onEventHook?: (
     hook: string,
     sessionName: string,
     payload?: unknown,
+    tenant?: string,
   ) => void | Promise<void>
   /** Dedicated interrupt callback: called after in-flight awaits are
    * aborted. When absent, interrupts fall back to onEventHook('interrupt').
    */
-  onInterrupt?: (sessionName: string, reason?: string) => void | Promise<void>
+  onInterrupt?: (
+    sessionName: string,
+    reason?: string,
+    tenant?: string,
+  ) => void | Promise<void>
   /**
    * Session lifecycle callback. On "deleted" the SDK also deletes the
    * session-scoped variables (KV) before calling this.
    */
-  onLifecycle?: (ev: LifecycleEvent) => void | Promise<void>
+  onLifecycle?: (ev: LifecycleEvent, tenant?: string) => void | Promise<void>
   /**
    * Applied config change. Returning an error (or throwing) REJECTS the
    * change: the agent keeps the old value and the revision does not advance.
@@ -116,6 +143,7 @@ export interface ExtensionConfig {
     value: unknown,
     sessionName: string | undefined,
     get: (name: string, sessionName?: string) => unknown,
+    tenant?: string,
   ) => void | Promise<void>
 }
 
@@ -123,12 +151,15 @@ export class Extension {
   readonly manifest: ExtensionManifest
   private unsubs: Array<() => void> = []
   private presenceTimer: ReturnType<typeof setInterval> | undefined
-  // In-flight tool calls per session (AbortController per call), so an
+  // In-flight tool calls per tenant+session (AbortController per call), so an
   // interrupt signal aborts that session's awaits (real cancel semantics:
   // JS cannot kill the running handler, but the call resolves immediately).
   private inflight = new Map<string, Set<AbortController>>()
-  private globalConfig = new Map<string, unknown>()
-  private sessionConfig = new Map<string, Map<string, unknown>>()
+  /** Per-tenant config caches, populated by the cfg KV watch + config reqs. */
+  private tenantConfig = new Map<
+    string,
+    { global: Map<string, unknown>; sessions: Map<string, Map<string, unknown>> }
+  >()
 
   /** Wire a transport and return a ready Extension (no manual createBus). */
   static async connect(
@@ -192,6 +223,7 @@ export class Extension {
         'kv-escaping',
         'interrupt-abort',
         'progress',
+        'multitenant',
       ],
       ...(tools.length > 0 ? { tools } : {}),
       ...(variables.length > 0 ? { prompt: { variables } } : {}),
@@ -223,27 +255,46 @@ export class Extension {
 
   /**
    * Effective config value: session override > global set > manifest default.
+   * Config is stored per tenant; `tenant` defaults to the empty tenant used by
+   * the legacy single-tenant callers (the getter is a cache lookup only).
    * Available inside onConfigChange via the injected `get`.
    */
-  getConfig(name: string, sessionName?: string): unknown {
+  getConfig(name: string, sessionName?: string, tenant = ''): unknown {
+    const cfg = this.tenantConfig.get(tenant) ?? {
+      global: new Map<string, unknown>(),
+      sessions: new Map<string, Map<string, unknown>>(),
+    }
     if (sessionName !== undefined) {
-      const override = this.sessionConfig.get(sessionName)?.get(name)
+      const override = cfg.sessions.get(sessionName)?.get(name)
       if (override !== undefined) return override
     }
-    const set = this.globalConfig.get(name)
+    const set = cfg.global.get(name)
     if (set !== undefined) return set
     return this.cfg.config?.[name]?.default
+  }
+
+  private cacheFor(tenant: string): {
+    global: Map<string, unknown>
+    sessions: Map<string, Map<string, unknown>>
+  } {
+    let c = this.tenantConfig.get(tenant)
+    if (c === undefined) {
+      c = { global: new Map(), sessions: new Map() }
+      this.tenantConfig.set(tenant, c)
+    }
+    return c
   }
 
   private async subscribeConfig(): Promise<void> {
     if (this.cfg.config === undefined) return
     // Recover state from the cfg KV bucket (0.2): the watch delivers the
     // snapshot at startup and live updates afterwards — no agent needs to
-    // be online. Live sets still arrive (and may be rejected) via the req.
+    // be online. Keys are `t.<tenant>.<extId>...`; live sets still arrive
+    // (and may be rejected) via the req.
     try {
       const { stream, stop } = await this.bus.kvWatch(
         CONFIG_BUCKET,
-        `${this.cfg.id}.>`,
+        `t.*.${this.cfg.id}.>`,
       )
       this.unsubs.push(() => void stop())
       void (async () => {
@@ -252,7 +303,7 @@ export class Extension {
     } catch {
       // Bucket missing yet — defaults apply until the first set.
     }
-    const sub = await this.bus.subscribe(CH.config(this.cfg.id))
+    const sub = await this.bus.subscribe(WILDCARD.config(this.cfg.id))
     this.unsubs.push(() => void sub.close())
     void (async () => {
       for await (const env of sub) {
@@ -261,13 +312,15 @@ export class Extension {
         const parsed = ConfigSetSchema.safeParse(env.payload)
         if (!parsed.success) continue
         const set = parsed.data
+        const tenant = env.tenant ?? subjectTenant(env.ch ?? '') ?? ''
+        const cache = this.cacheFor(tenant)
         let rejected: { code: 'internal'; message: string } | undefined
         if (set.scope === 'global') {
-          this.globalConfig.set(set.name, set.value)
+          cache.global.set(set.name, set.value)
         } else if (set.session_name !== undefined) {
-          const m = this.sessionConfig.get(set.session_name) ?? new Map()
+          const m = cache.sessions.get(set.session_name) ?? new Map()
           m.set(set.name, set.value)
-          this.sessionConfig.set(set.session_name, m)
+          cache.sessions.set(set.session_name, m)
         }
         const handler = this.cfg.onConfigChange
         if (handler !== undefined) {
@@ -276,7 +329,8 @@ export class Extension {
               set.name,
               set.value,
               set.session_name,
-              (name, sessionName) => this.getConfig(name, sessionName),
+              (name, sessionName) => this.getConfig(name, sessionName, tenant),
+              tenant,
             )
           } catch (e) {
             rejected = { code: 'internal', message: String(e) }
@@ -284,9 +338,9 @@ export class Extension {
         }
         // Roll back local state on rejection so the old value stays effective.
         if (rejected !== undefined) {
-          if (set.scope === 'global') this.globalConfig.delete(set.name)
+          if (set.scope === 'global') cache.global.delete(set.name)
           else if (set.session_name !== undefined) {
-            this.sessionConfig.get(set.session_name)?.delete(set.name)
+            cache.sessions.get(set.session_name)?.delete(set.name)
           }
         }
         if (set.ack) {
@@ -295,6 +349,7 @@ export class Extension {
             rejected !== undefined
               ? { ok: false, error: rejected }
               : { ok: true },
+            { tenant: GLOBAL_TENANT },
           )
         }
       }
@@ -302,8 +357,7 @@ export class Extension {
   }
 
   /** Liveness heartbeat: manifest into the abc-presence KV bucket with a
-   * TTL, refreshed every interval. Agents watching presence see extensions
-   * arrive and (via TTL) disappear. */
+   * TTL, refreshed every interval. Global (extensions serve all tenants). */
   startPresence(): void {
     const put = () =>
       void this.bus
@@ -332,10 +386,12 @@ export class Extension {
 
   /**
    * Report in-flight progress for a tool call. A one-way `pub` on
-   * `abc.tool.progress.<callId>`, consumed by the agent's orchestration layer
-   * (never the LLM context). Emitting it implicitly signals "still running".
+   * `abc.<tenant>.tool.progress.<callId>`, consumed by the agent's
+   * orchestration layer (never the LLM context). Emitting it implicitly
+   * signals "still running".
    */
   async reportProgress(
+    tenant: string,
     callId: string,
     progress: {
       phase?: string
@@ -344,25 +400,28 @@ export class Extension {
       metadata?: unknown
     },
   ): Promise<void> {
-    await this.bus.publish(CH.toolProgress(callId), {
-      call_id: callId,
-      ...progress,
-    })
+    await this.bus.publish(
+      CH.toolProgress(tenant, callId),
+      { call_id: callId, ...progress },
+      { tenant },
+    )
   }
 
   private async subscribeDiscovery() {
-    const sub = await this.bus.subscribe(CH.DISCOVER)
+    const sub = await this.bus.subscribe(WILDCARD.discover)
     this.unsubs.push(() => void sub.close())
     void (async () => {
       for await (const env of sub) {
-        if (env.reply_to) await this.bus.publish(env.reply_to, this.manifest)
+        if (env.reply_to) await this.bus.publish(env.reply_to, this.manifest, {
+          tenant: GLOBAL_TENANT,
+        })
       }
     })()
   }
 
   private async subscribeTools() {
     for (const [name, spec] of Object.entries(this.cfg.tools ?? {})) {
-      const sub = await this.bus.subscribe(CH.toolCall(this.cfg.id, name), {
+      const sub = await this.bus.subscribe(WILDCARD.toolCall(this.cfg.id, name), {
         queue: this.cfg.id,
       })
       this.unsubs.push(() => void sub.close())
@@ -374,6 +433,7 @@ export class Extension {
           if (!parsed.success) continue
           const p = parsed.data
           const sessionName = env.session_name ?? ''
+          const tenant = env.tenant ?? subjectTenant(env.ch ?? '') ?? ''
           const respond = async (
             result: ToolResultData | undefined,
             error?: ErrorPayload,
@@ -384,7 +444,10 @@ export class Extension {
               if (result.content !== undefined) {
                 if (result.content.length > OFFLOAD_THRESHOLD) {
                   const objName = `${p.call_id}.data`
-                  await this.bus.objectPut(objName, Buffer.from(result.content))
+                  await this.bus.objectPut(
+                    tenantObjectName(tenant, objName),
+                    Buffer.from(result.content),
+                  )
                   res.object = { id: objName, content_type: 'text/plain' }
                   res.content = result.content.slice(0, 400)
                 } else {
@@ -394,10 +457,11 @@ export class Extension {
               if (result.data !== undefined) res.data = result.data
               if (result.object !== undefined) res.object = result.object
             }
-            await this.bus.publish(replyTo, res)
+            await this.bus.publish(replyTo, res, { tenant })
           }
           const ac = new AbortController()
-          if (sessionName !== '') this.trackInflight(sessionName, ac)
+          const inflightKey = `${tenant}\n${sessionName}`
+          if (sessionName !== '') this.trackInflight(inflightKey, ac)
           let settled = false
           const aborted = new Promise<never>((_, reject) => {
             ac.signal.addEventListener('abort', () => {
@@ -411,6 +475,7 @@ export class Extension {
                 p.call_id,
                 sessionName,
                 ac.signal,
+                tenant,
               ),
               aborted,
             ])
@@ -423,7 +488,7 @@ export class Extension {
               message: String(e),
             })
           } finally {
-            this.untrackInflight(sessionName, ac)
+            this.untrackInflight(inflightKey, ac)
           }
         }
       })()
@@ -432,7 +497,7 @@ export class Extension {
 
   private async subscribeVariables() {
     for (const [name, spec] of Object.entries(this.cfg.variables ?? {})) {
-      const sub = await this.bus.subscribe(CH.variable(this.cfg.id, name), {
+      const sub = await this.bus.subscribe(WILDCARD.variable(this.cfg.id, name), {
         queue: this.cfg.id,
       })
       this.unsubs.push(() => void sub.close())
@@ -442,9 +507,10 @@ export class Extension {
           const resolver = spec.resolve
           if (resolver === undefined) continue
           const sessionName = env.session_name
+          const tenant = env.tenant ?? subjectTenant(env.ch ?? '') ?? ''
           try {
-            const value = await resolver(sessionName)
-            await this.bus.publish(env.reply_to, { name, value })
+            const value = await resolver(sessionName, tenant)
+            await this.bus.publish(env.reply_to, { name, value }, { tenant })
           } catch {
             // leave unanswered -> caller keeps the literal placeholder
           }
@@ -455,7 +521,7 @@ export class Extension {
 
   private async subscribeCallHooks() {
     for (const hook of this.cfg.callHooks ?? []) {
-      const sub = await this.bus.subscribe(CH.hookCall(this.cfg.id, hook), {
+      const sub = await this.bus.subscribe(WILDCARD.hookCall(this.cfg.id, hook), {
         queue: this.cfg.id,
       })
       this.unsubs.push(() => void sub.close())
@@ -465,6 +531,7 @@ export class Extension {
           const parsed = HookCallSchema.safeParse(env.payload)
           const p = parsed.success ? parsed.data : undefined
           const sessionName = p?.session_name ?? env.session_name ?? ''
+          const tenant = env.tenant ?? subjectTenant(env.ch ?? '') ?? ''
           const badArgs = validateJsonSchema(
             this.cfg.hookSchemas?.call?.[hook],
             p?.arguments,
@@ -486,7 +553,7 @@ export class Extension {
             }
           } else {
             try {
-              res = await handler(hook, sessionName, p?.arguments)
+              res = await handler(hook, sessionName, p?.arguments, tenant)
             } catch (e) {
               res = {
                 ok: false,
@@ -494,7 +561,7 @@ export class Extension {
               }
             }
           }
-          await this.bus.publish(env.reply_to, res)
+          await this.bus.publish(env.reply_to, res, { tenant })
         }
       })()
     }
@@ -502,7 +569,7 @@ export class Extension {
 
   private async subscribeEventHooks() {
     for (const hook of this.cfg.eventHooks ?? []) {
-      const sub = await this.bus.subscribe(CH.hookEvent(hook), {
+      const sub = await this.bus.subscribe(WILDCARD.hookEvent(hook), {
         queue: this.cfg.id,
       })
       this.unsubs.push(() => void sub.close())
@@ -511,13 +578,14 @@ export class Extension {
           const parsed = HookEventSchema.safeParse(env.payload)
           const ev = parsed.success ? parsed.data : undefined
           const sessionName = ev?.session_name ?? env.session_name ?? ''
+          const tenant = env.tenant ?? subjectTenant(env.ch ?? '') ?? ''
           const bad = validateJsonSchema(
             this.cfg.hookSchemas?.event?.[hook],
             ev?.payload,
           )
           if (bad !== null) continue // invalid event payload: drop (best-effort)
           if (this.cfg.onEventHook !== undefined) {
-            await this.cfg.onEventHook(hook, sessionName, ev?.payload)
+            await this.cfg.onEventHook(hook, sessionName, ev?.payload, tenant)
           }
         }
       })()
@@ -527,54 +595,64 @@ export class Extension {
   private async subscribeLifecycle(): Promise<void> {
     const kinds = this.cfg.lifecycle ?? []
     if (kinds.length === 0 || this.cfg.onLifecycle === undefined) return
-    const sub = await this.bus.subscribe('abc.session.lifecycle.>', {
+    const sub = await this.bus.subscribe(WILDCARD.lifecycle, {
       queue: this.cfg.id,
     })
     this.unsubs.push(() => void sub.close())
     void (async () => {
       for await (const env of sub) {
-        const kind = env.ch.slice('abc.session.lifecycle.'.length)
+        const tenant = env.tenant ?? subjectTenant(env.ch ?? '') ?? ''
+        const kind = env.ch.slice(env.ch.lastIndexOf('.') + 1)
         if (!kinds.includes(kind as 'created')) continue
         const parsed = LifecycleEventSchema.safeParse(env.payload)
         if (!parsed.success) continue
         if (kind === 'deleted') {
-          await this.deleteSessionVariables(parsed.data.session_name).catch(
-            () => {},
-          )
+          await this.deleteSessionVariables(
+            tenant,
+            parsed.data.session_name,
+          ).catch(() => {})
         }
-        await this.cfg.onLifecycle?.(parsed.data)
+        await this.cfg.onLifecycle?.(parsed.data, tenant)
       }
     })()
   }
 
-  /** Delete every session-scoped variable of a session (KV). */
-  private async deleteSessionVariables(sessionName: string): Promise<void> {
+  /** Delete every session-scoped variable of a tenant's session (KV). */
+  private async deleteSessionVariables(
+    tenant: string,
+    sessionName: string,
+  ): Promise<void> {
     for (const [name, spec] of Object.entries(this.cfg.variables ?? {})) {
       if (spec.scope !== 'session') continue
       await this.bus
-        .kvDelete(VARS_BUCKET, sessionVarKey(this.cfg.id, sessionName, name))
+        .kvDelete(
+          VARS_BUCKET,
+          sessionVarKey(tenant, this.cfg.id, sessionName, name),
+        )
         .catch(() => {})
     }
   }
 
-  /** Apply a cfg-bucket watch entry. Key layout: <extId>.<name> (global)
-   * or <extId>.<session>.<name> (session). Envelope {r,v} with a
-   * bare-value fallback for pre-0.2 entries. */
+  /** Apply a cfg-bucket watch entry. Key layout:
+   *  t.<tenant>.<extId>.<name> (global) or
+   *  t.<tenant>.<extId>.<session>.<name> (session). Envelope {r,v} with a
+   *  bare-value fallback for pre-0.2 entries. */
   private applyConfigKV(ev: KvEvent): void {
-    // Key layout: <extId>.<name> (global) or <extId>.<escapedSession>.<name>.
-    // The session segment is escaped (v0.2.2+); legacy colon-style session
-    // names parse identically (their segments carry no dots).
-    const rest = ev.key.slice(this.cfg.id.length + 1)
+    // Strip the leading `t.<tenant>.` segment first.
+    const parts = ev.key.split('.')
+    if (parts[0] !== 't' || parts.length < 4) return
+    const tenant = parts[1] ?? ''
+    const rest = parts.slice(3).join('.')
     const i = rest.indexOf('.')
     if (i === -1) {
-      if (!ev.deleted) this.applyConfigValue('', rest, ev.value)
-      else this.globalConfig.delete(rest)
+      if (!ev.deleted) this.applyConfigValue(tenant, '', rest, ev.value)
+      else this.cacheFor(tenant).global.delete(rest)
       return
     }
     const session = unescapeKVSegment(rest.slice(0, i))
     const name = rest.slice(i + 1)
     if (ev.deleted) {
-      this.sessionConfig.get(session)?.delete(name)
+      this.cacheFor(tenant).sessions.get(session)?.delete(name)
       return
     }
     let v: unknown
@@ -589,12 +667,18 @@ export class Extension {
       return
     }
     if (v === undefined || v === null) return
-    const m = this.sessionConfig.get(session) ?? new Map()
+    const cache = this.cacheFor(tenant)
+    const m = cache.sessions.get(session) ?? new Map()
     m.set(name, v)
-    this.sessionConfig.set(session, m)
+    cache.sessions.set(session, m)
   }
 
-  private applyConfigValue(session: string, name: string, value: string): void {
+  private applyConfigValue(
+    tenant: string,
+    session: string,
+    name: string,
+    value: string,
+  ): void {
     let v: unknown
     try {
       const parsed = JSON.parse(value) as { r?: number; v?: unknown }
@@ -607,16 +691,17 @@ export class Extension {
       return
     }
     if (v === undefined || v === null) return
-    if (session === '') this.globalConfig.set(name, v)
+    const cache = this.cacheFor(tenant)
+    if (session === '') cache.global.set(name, v)
     else {
-      const m = this.sessionConfig.get(session) ?? new Map()
+      const m = cache.sessions.get(session) ?? new Map()
       m.set(name, v)
-      this.sessionConfig.set(session, m)
+      cache.sessions.set(session, m)
     }
   }
 
   private async subscribeInterrupt() {
-    const sub = await this.bus.subscribe(CH.interrupt(this.cfg.id), {
+    const sub = await this.bus.subscribe(WILDCARD.interrupt(this.cfg.id), {
       queue: this.cfg.id,
     })
     this.unsubs.push(() => void sub.close())
@@ -625,59 +710,80 @@ export class Extension {
         const parsed = InterruptSignalSchema.safeParse(env.payload)
         const sig = parsed.success ? parsed.data : undefined
         const sessionName = sig?.session_name ?? env.session_name ?? ''
+        const tenant = env.tenant ?? subjectTenant(env.ch ?? '') ?? ''
         // Abort in-flight awaits first: session-scoped signal cancels that
-        // session only; a signal without a session is a broadcast.
-        this.abortInflight(sessionName === '' ? undefined : sessionName)
+        // session only; a signal without a session is a tenant broadcast.
+        this.abortInflight(
+          sessionName === ''
+            ? tenant === ''
+              ? undefined
+              : { tenant }
+            : { tenant, sessionName },
+        )
         if (this.cfg.onInterrupt !== undefined) {
-          await this.cfg.onInterrupt(sessionName, sig?.reason)
+          await this.cfg.onInterrupt(sessionName, sig?.reason, tenant)
         } else if (this.cfg.onEventHook !== undefined) {
-          await this.cfg.onEventHook('interrupt', sessionName, sig?.reason)
+          await this.cfg.onEventHook('interrupt', sessionName, sig?.reason, tenant)
         }
       }
     })()
   }
 
-  private trackInflight(session: string, ac: AbortController): void {
-    let set = this.inflight.get(session)
+  private trackInflight(key: string, ac: AbortController): void {
+    let set = this.inflight.get(key)
     if (set === undefined) {
       set = new Set()
-      this.inflight.set(session, set)
+      this.inflight.set(key, set)
     }
     set.add(ac)
   }
 
-  private untrackInflight(session: string, ac: AbortController): void {
-    if (session === '') return
-    const set = this.inflight.get(session)
+  private untrackInflight(key: string, ac: AbortController): void {
+    const set = this.inflight.get(key)
     if (set === undefined) return
     set.delete(ac)
-    if (set.size === 0) this.inflight.delete(session)
+    if (set.size === 0) this.inflight.delete(key)
   }
 
-  /** Abort in-flight awaits; undefined session = broadcast (all). */
-  private abortInflight(session: string | undefined): void {
-    if (session === undefined) {
+  /**
+   * Abort in-flight awaits. `undefined` = broadcast (all); `{tenant}` = all
+   * sessions of one tenant; `{tenant, sessionName}` = one session.
+   */
+  private abortInflight(
+    scope: { tenant: string; sessionName?: string } | undefined,
+  ): void {
+    if (scope === undefined) {
       const all = this.inflight
       this.inflight = new Map()
       for (const set of all.values()) for (const ac of set) ac.abort()
       return
     }
-    const set = this.inflight.get(session)
-    this.inflight.delete(session)
-    if (set !== undefined) for (const ac of set) ac.abort()
+    const prefix = `${scope.tenant}\n`
+    const keys: string[] = []
+    if (scope.sessionName !== undefined) {
+      keys.push(`${prefix}${scope.sessionName}`)
+    } else {
+      for (const k of this.inflight.keys()) if (k.startsWith(prefix)) keys.push(k)
+    }
+    for (const k of keys) {
+      const set = this.inflight.get(k)
+      this.inflight.delete(k)
+      if (set !== undefined) for (const ac of set) ac.abort()
+    }
   }
 }
 
 export const VARS_BUCKET = 'vars'
-export function varKey(provider: string, name: string): string {
-  return `${provider}.${name}`
+export function varKey(tenant: string, provider: string, name: string): string {
+  return tenantKVKey(tenant, `${provider}.${name}`)
 }
 export function sessionVarKey(
+  tenant: string,
   provider: string,
   sessionName: string,
   name: string,
 ): string {
-  return `${provider}.${sessionToken(sessionName)}.${name}`
+  return tenantKVKey(tenant, `${provider}.${sessionToken(sessionName)}.${name}`)
 }
 
 function _mailboxWildcard(): string {
@@ -689,61 +795,66 @@ void _mailboxWildcard
 // Session-facing helpers (session events, mailbox, variables, objects).
 
 /**
- * Push one SSE event onto the session's durable event stream
- * (`abc.session.events.<token>`) — the channel the agent's SSE handler
- * replays and live-tails. Use for UI-facing side-effect notices.
+ * Push one SSE event onto the tenant's session durable event stream
+ * (`abc.<tenant>.session.events.<token>`) — the channel the agent's SSE
+ * handler replays and live-tails. Use for UI-facing side-effect notices.
  */
 export async function publishSessionEvent(
   bus: Bus,
+  tenant: string,
   sessionName: string,
   event: string,
   params?: unknown,
 ): Promise<void> {
   const id = crypto.randomUUID()
   await bus.inboxPublish(
-    CH.sessionEvents(sessionName),
+    CH.sessionEvents(tenant, sessionName),
     { event, params, eid: id },
-    { id, sessionName },
+    { id, sessionName, tenant },
   )
 }
 
-/** Publish an event into a session's durable mailbox. */
+/** Publish an event into a tenant session's durable mailbox. */
 export async function publishMailboxEvent(
   bus: Bus,
+  tenant: string,
   sessionName: string,
   eventType = 'event',
   payload?: unknown,
 ): Promise<void> {
   const id = crypto.randomUUID()
   await bus.inboxPublish(
-    CH.mailbox(sessionName),
+    CH.mailbox(tenant, sessionName),
     { id, type: eventType, payload },
-    { id, sessionName },
+    { id, sessionName, tenant },
   )
 }
 
-/** Store an object (large tool results, …). */
+/** Store an object (large tool results, …) — tenant scoped. */
 export function putObject(
   bus: Bus,
+  tenant: string,
   name: string,
   data: Uint8Array,
 ): Promise<void> {
-  return bus.objectPut(name, data)
+  return bus.objectPut(tenantObjectName(tenant, name), data)
 }
 
-/** Store a global variable (vars.<extId>.<name>). */
+/** Store a global variable (t.<tenant>.vars.<extId>.<name>). */
 export function setVariable(
   bus: Bus,
+  tenant: string,
   extId: string,
   name: string,
   value: string,
 ): Promise<void> {
-  return bus.kvPut(VARS_BUCKET, varKey(extId, name), value, 0)
+  return bus.kvPut(VARS_BUCKET, varKey(tenant, extId, name), value, 0)
 }
 
-/** Store a session variable (vars.<extId>.<token>.<name>) — the KV cache. */
+/** Store a session variable — the KV cache. */
 export function setSessionVariable(
   bus: Bus,
+  tenant: string,
   extId: string,
   sessionName: string,
   name: string,
@@ -751,18 +862,16 @@ export function setSessionVariable(
 ): Promise<void> {
   return bus.kvPut(
     VARS_BUCKET,
-    sessionVarKey(extId, sessionName, name),
+    sessionVarKey(tenant, extId, sessionName, name),
     value,
     0,
   )
 }
 
-// trackInflight registers a call's AbortController under its session.
-
 // CONFIG_BUCKET is the cfg KV bucket name (source of truth for config).
 const CONFIG_BUCKET = 'cfg'
 
 /** Presence bucket: key = extId, value = manifest, TTL refreshed by the
- * extension heartbeat (extension/index.ts). */
+ * extension heartbeat (extension/index.ts). Global across tenants. */
 export const PRESENCE_BUCKET = 'abc-presence'
 export const PRESENCE_TTL_MS = 15_000

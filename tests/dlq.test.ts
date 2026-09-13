@@ -25,7 +25,7 @@ describe('abc dlq: poison escalation + requeue', () => {
     const bus = await connectNatsBus(url)
     const a = new Agent(bus)
     const tag = 'escal-' + Math.random().toString(36).slice(2, 8)
-    await a.publishMailbox('sess-poison', tag, { n: 1 })
+    await a.publishMailbox('t1', 'sess-poison', tag, { n: 1 })
     let deliveries = 0
     const stop = await a.consumeMailbox(
       () => {
@@ -62,7 +62,7 @@ describe('abc dlq: poison escalation + requeue', () => {
       2,
       100,
     )
-    await a.publishMailbox('sess-rq', tag, { k: 1 })
+    await a.publishMailbox('t1', 'sess-rq', tag, { k: 1 })
     let dlqId = ''
     const dlqStop1 = await a.consumeDLQ(m => {
       if (m.type === tag && dlqId === '') dlqId = m.id

@@ -27,13 +27,13 @@ describe('abc stream topology reconcile', () => {
       // the reconciled topology routes events into the ABC_EVENTS stream.
       const got: unknown[] = []
       const done = (async () => {
-        for await (const e of a.streamEvents('sess-reconcile')) {
+        for await (const e of a.streamEvents('t1', 'sess-reconcile')) {
           got.push(e)
           break
         }
       })()
       await new Promise(r => setTimeout(r, 100))
-      await publishSessionEvent(bus, 'sess-reconcile', 'ok')
+      await publishSessionEvent(bus, 't1', 'sess-reconcile', 'ok')
       await done
       if (got.length === 0) throw new Error('reconcile broke event stream')
       await bus.close()
