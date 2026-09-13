@@ -95,6 +95,33 @@ async function ensureStreams(
     { name: STREAM_EVENTS, subjects: [EVENTS_WILDCARD_ALL] },
     { name: STREAM_DLQ, subjects: [DLQ_WILDCARD_ALL] },
   ]
+
+  // v1 -> v2 migration. The v1 layout used subject-per-area WITHOUT a tenant
+  // segment (`abc.mailbox.>`, `abc.session.events.>`, `abc.dlq.>`). Those are
+  // not in-place reconcilable to the v2 wildcards (`abc.*.mailbox.>` etc.)
+  // because a leading `*` lets `abc.<area>.mailbox.…` match another stream's
+  // old `abc.<area>.>` subject — NATS rejects the update as an overlap. These
+  // three streams are EPHEMERAL (24h) carriers of mailbox/events/dlq only; the
+  // durable state lives in the KV/object buckets, which are untouched. So the
+  // migration drops and recreates the three streams.
+  let legacyLayout = false
+  for (const s of specs) {
+    try {
+      const info = await jsm.streams.info(s.name)
+      const subs = info.config.subjects ?? []
+      if (subs.some(sub => /^abc\.(mailbox|session|dlq)\./.test(sub))) {
+        legacyLayout = true
+      }
+    } catch {
+      // absent: nothing to detect
+    }
+  }
+  if (legacyLayout) {
+    for (const s of specs) {
+      await jsm.streams.delete(s.name).catch(() => {})
+    }
+  }
+
   for (const s of specs) {
     let info: Awaited<ReturnType<typeof jsm.streams.info>> | undefined
     try {
