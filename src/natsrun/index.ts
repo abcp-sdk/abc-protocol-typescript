@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
-import { createServer } from 'node:net'
+import { connect as netConnect, createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { jetstreamManager } from '@nats-io/jetstream'
@@ -75,21 +75,27 @@ function freePort(): Promise<number> {
 }
 
 function waitReady(port: number, timeoutMs: number): Promise<void> {
+  // Ready = a client can CONNECT to the port (the server is listening).
+  // ECONNREFUSED means the server has not bound the port yet — keep polling.
   const deadline = Date.now() + timeoutMs
   return new Promise((resolve, reject) => {
     const tick = (): void => {
-      const sock = createServer()
-      sock.once('error', () => retry())
-      sock.listen(port, '127.0.0.1', () => {
-        sock.close(() => resolve())
-      })
-    }
-    const retry = (): void => {
-      if (Date.now() > deadline) {
-        reject(new Error(`natsrun: server on port ${port} not ready`))
-        return
+      const sock = netConnect(port, '127.0.0.1')
+      let settled = false
+      const done = (ok: boolean): void => {
+        if (settled) return
+        settled = true
+        sock.removeAllListeners()
+        sock.destroy()
+        if (ok) resolve()
+        else if (Date.now() > deadline) {
+          reject(new Error(`natsrun: server on port ${port} not ready`))
+        } else {
+          setTimeout(tick, 60)
+        }
       }
-      setTimeout(tick, 60)
+      sock.once('error', () => done(false))
+      sock.once('connect', () => done(true))
     }
     tick()
   })
