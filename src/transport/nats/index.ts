@@ -33,6 +33,7 @@ const STREAM_EVENTS = 'ABC_EVENTS'
 const STREAM_DLQ = 'ABC_DLQ'
 const MAILBOX_WILDCARD_ALL = 'abc.*.mailbox.>'
 const EVENTS_WILDCARD_ALL = 'abc.*.session.events.>'
+const LIFECYCLE_WILDCARD_ALL = 'abc.*.session.lifecycle.>'
 const DLQ_WILDCARD_ALL = 'abc.*.dlq.>'
 const OBJECT_BUCKET = 'ABC_TOOL'
 const OBJECT_BUCKET_PERSISTENT = 'ABC_FILES'
@@ -47,7 +48,8 @@ const OBJECT_BUCKET_PERSISTENT = 'ABC_FILES'
  */
 function streamFor(subject: string): string {
   const seg = subject.split('.')
-  if (seg[2] === 'session' && seg[3] === 'events') return STREAM_EVENTS
+  if (seg[2] === 'session' && (seg[3] === 'events' || seg[3] === 'lifecycle'))
+    return STREAM_EVENTS
   if (seg[2] === 'dlq') return STREAM_DLQ
   return STREAM_MAILBOX
 }
@@ -92,7 +94,10 @@ async function ensureStreams(
   const maxAge = opts.maxAgeMs ?? 24 * 3600 * 1_000_000_000
   const specs = [
     { name: STREAM_MAILBOX, subjects: [MAILBOX_WILDCARD_ALL] },
-    { name: STREAM_EVENTS, subjects: [EVENTS_WILDCARD_ALL] },
+    {
+      name: STREAM_EVENTS,
+      subjects: [EVENTS_WILDCARD_ALL, LIFECYCLE_WILDCARD_ALL],
+    },
     { name: STREAM_DLQ, subjects: [DLQ_WILDCARD_ALL] },
   ]
 

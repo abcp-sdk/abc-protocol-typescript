@@ -142,7 +142,10 @@ export async function start(opts: ServerConfig = {}): Promise<Server> {
       const jsm = await jetstreamManager(nc)
       for (const s of [
         { name: 'ABC_MAILBOX', subjects: ['abc.*.mailbox.>'] },
-        { name: 'ABC_EVENTS', subjects: ['abc.*.session.events.>'] },
+        {
+          name: 'ABC_EVENTS',
+          subjects: ['abc.*.session.events.>', 'abc.*.session.lifecycle.>'],
+        },
         { name: 'ABC_DLQ', subjects: ['abc.*.dlq.>'] },
       ]) {
         await jsm.streams.add({
