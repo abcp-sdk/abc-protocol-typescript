@@ -2,11 +2,13 @@ import { readFileSync } from 'node:fs'
 import { parse as parseYaml } from 'yaml'
 import type {
   ConfigSpec,
+  ModelCapability,
   ExtensionConfig,
   ToolSpec,
   VariableSpec,
 } from './extension/index.js'
 import { z } from './zod.js'
+import { MODEL_CAPABILITIES } from './protocol/payload.js'
 
 const ManifestToolSchema = z.object({
   name: z.string(),
@@ -26,6 +28,13 @@ const ManifestVariableSchema = z.object({
 const ManifestConfigSchema = z.object({
   name: z.string(),
   type: z.enum(['string', 'number', 'boolean', 'enum', 'json']),
+  /**
+   * `model` declares the value is a `provider_id/model_id` reference: the UI
+   * renders a picker scoped to `capability` (the modality) against the
+   * agent's provider registry, instead of a free-form text field.
+   */
+  kind: z.enum(['value', 'model']).default('value'),
+  capability: z.enum(MODEL_CAPABILITIES).optional(),
   enum_values: z.array(z.string()).optional(),
   default: z.unknown().optional(),
   description: z.string().optional(),
@@ -83,6 +92,8 @@ export interface Manifest {
   config?: Array<{
     name: string
     type: 'string' | 'number' | 'boolean' | 'enum' | 'json'
+    kind?: 'value' | 'model'
+    capability?: ModelCapability
     enum_values?: string[]
     default?: unknown
     description?: string
@@ -152,6 +163,8 @@ export function manifestConfig(
   }
   for (const c of manifest.config ?? []) {
     const spec: ConfigSpec = { type: c.type }
+    if (c.kind !== undefined) spec.kind = c.kind
+    if (c.capability !== undefined) spec.capability = c.capability
     if (c.enum_values !== undefined) spec.enumValues = c.enum_values
     if (c.default !== undefined) spec.default = c.default
     if (c.description !== undefined) spec.description = c.description

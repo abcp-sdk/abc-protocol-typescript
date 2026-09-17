@@ -14,11 +14,15 @@ import {
   type LifecycleEvent,
   LifecycleEventSchema,
   MAILBOX_WILDCARD,
+  type ModelCapability,
   sessionToken,
   ToolCallEnvelopeSchema,
   type ToolResult,
 } from '../protocol/index.js'
 import { validateJsonSchema } from '../protocol/jsonschema.js'
+
+export { MODEL_CAPABILITIES } from '../protocol/payload.js'
+export type { ModelCapability } from '../protocol/payload.js'
 import { unescapeKVSegment } from '../protocol/kv-escaping.js'
 import {
   GLOBAL_TENANT,
@@ -83,6 +87,14 @@ export interface ConfigSpec {
   descriptions?: Record<string, string>
   /** Value type validated agent-side; also the shape passed to the callback. */
   type: 'string' | 'number' | 'boolean' | 'enum' | 'json'
+  /**
+   * `value` (default) = ordinary knob. `model` = the value is a
+   * `provider_id/model_id` reference; the UI renders a picker scoped to
+   * `capability` (a registered modality) instead of a text field.
+   */
+  kind?: 'value' | 'model'
+  /** Required when `kind` is `model`: the modality the reference must match. */
+  capability?: ModelCapability
   /** Allowed values when type is enum. */
   enumValues?: string[]
   /** Applied until the first set. */
@@ -199,6 +211,8 @@ export class Extension {
       .map(([name, c]) => ({
         name,
         type: c.type,
+        kind: c.kind ?? 'value',
+        ...(c.capability !== undefined ? { capability: c.capability } : {}),
         ...(c.enumValues !== undefined ? { enum_values: c.enumValues } : {}),
         ...(c.default !== undefined ? { default: c.default } : {}),
         ...(c.description !== undefined ? { description: c.description } : {}),

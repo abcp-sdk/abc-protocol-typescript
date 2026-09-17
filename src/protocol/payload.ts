@@ -9,6 +9,25 @@ import { ErrorPayloadSchema } from './error.js'
  */
 
 /**
+ * A model capability (modality). A config item declared with
+ * `kind: 'model'` names the capability; the agent's UI then offers only
+ * models REGISTERED under that capability (provider registry), instead of a
+ * free-form text field. `realtime` has no consumer yet but is a first-class
+ * modality.
+ */
+export const MODEL_CAPABILITIES = [
+  'text',
+  'image',
+  'video',
+  'speech',
+  'transcription',
+  'embedding',
+  'rerank',
+  'realtime',
+] as const
+export type ModelCapability = (typeof MODEL_CAPABILITIES)[number]
+
+/**
  * A declared configuration item. Agent-side writes are validated against
  * this declaration; the extension reacts to applied changes.
  */
@@ -16,6 +35,14 @@ export const ExtensionConfigItemSchema = z.object({
   name: z.string(),
   /** Value type, used by the agent-side writer for validation. */
   type: z.enum(['string', 'number', 'boolean', 'enum', 'json']),
+  /**
+   * Semantic kind: `value` (default) is an ordinary knob; `model` declares
+   * that the value is a `provider_id/model_id` reference, so the UI renders a
+   * picker scoped to `capability` rather than a text field.
+   */
+  kind: z.enum(['value', 'model']).default('value'),
+  /** Required when `kind` is `model`: which modality the value references. */
+  capability: z.enum(MODEL_CAPABILITIES).optional(),
   /** Allowed values when type is enum. */
   enum_values: z.array(z.string()).optional(),
   /** Applied when no value has been set (yet). */

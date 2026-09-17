@@ -429,6 +429,27 @@
                     "json"
                   ]
                 },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "value",
+                    "model"
+                  ],
+                  "default": "value"
+                },
+                "capability": {
+                  "type": "string",
+                  "enum": [
+                    "text",
+                    "image",
+                    "video",
+                    "speech",
+                    "transcription",
+                    "embedding",
+                    "rerank",
+                    "realtime"
+                  ]
+                },
                 "enum_values": {
                   "type": "array",
                   "items": {
@@ -580,6 +601,27 @@
               "boolean",
               "enum",
               "json"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "value",
+              "model"
+            ],
+            "default": "value"
+          },
+          "capability": {
+            "type": "string",
+            "enum": [
+              "text",
+              "image",
+              "video",
+              "speech",
+              "transcription",
+              "embedding",
+              "rerank",
+              "realtime"
             ]
           },
           "enum_values": {
