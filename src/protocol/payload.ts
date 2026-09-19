@@ -305,6 +305,12 @@ export type HookResponse = z.infer<typeof HookResponseSchema>
 /**
  * File metadata as carried on the file RPCs. Mirrors the agent's `FileRecord`
  * metadata and the ts/go `FileMeta` shape (`uploader_session` wire field).
+ *
+ * The optional media fields are SERVER-derived (agent-side ffprobe/ffmpeg):
+ * `width`/`height` (px), `duration_ms`, `thumb_code` (the code of a separate
+ * content-addressed thumbnail file) and `thumbhash` (base64 of a ThumbHash
+ * placeholder). They are absent for non-media files and for files stored
+ * before the feature existed.
  */
 export const FileMetaSchema = z.object({
   code: z.string(),
@@ -314,6 +320,11 @@ export const FileMetaSchema = z.object({
   size: z.number().int(),
   uploader_session: z.string().optional(),
   created_at: z.string(),
+  width: z.number().int().optional(),
+  height: z.number().int().optional(),
+  duration_ms: z.number().int().optional(),
+  thumb_code: z.string().optional(),
+  thumbhash: z.string().optional(),
 })
 export type FileMetaWire = z.infer<typeof FileMetaSchema>
 
