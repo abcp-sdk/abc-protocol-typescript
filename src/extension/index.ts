@@ -864,16 +864,22 @@ export function putObject(
  * the agent DB): the agent persists the bytes to the configured object store
  * and the metadata to the configured meta backend, using the SAME path as an
  * in-process ingest. Tenant is derived from the request subject/envelope.
+ *
+ * BYTES NEVER RIDE THE MESSAGE: the bytes are first put in the transient
+ * object store (chunked by the transport, so any size is fine) and only the
+ * object reference travels in the request.
  */
 export async function ingestFileViaAgent(
   bus: Bus,
   tenant: string,
   req: { name: string; mime: string; data: Uint8Array; sessionName?: string },
 ): Promise<string> {
+  const object = `${crypto.randomUUID()}.ingest`
+  await bus.objectPut(tenantObjectName(tenant, object), req.data)
   const payload: Record<string, unknown> = {
     name: req.name,
     mime: req.mime,
-    data: Buffer.from(req.data).toString('base64'),
+    object,
   }
   if (req.sessionName !== undefined) payload['session_name'] = req.sessionName
   const reply = await bus.request(CH.fileIngest(tenant), payload, {
@@ -893,7 +899,9 @@ export async function ingestFileViaAgent(
 }
 
 /** Fetch stored bytes through the AGENT (a 1:1 `req` on
- *  `abc.<tenant>.file.get`). Returns null when the file is absent. */
+ *  `abc.<tenant>.file.get`). Returns null when the file is absent. The agent
+ *  writes the bytes to the transient object store and returns the reference,
+ *  so the bytes never ride the message. */
 export async function getFileViaAgent(
   bus: Bus,
   tenant: string,
@@ -903,9 +911,11 @@ export async function getFileViaAgent(
   const parsed = FileGetResponseSchema.safeParse(reply.payload)
   if (!parsed.success || !parsed.data.ok) return null
   const meta = parsed.data.meta
-  const data = parsed.data.data
-  if (meta === undefined || data === undefined) return null
-  return { meta, data: new Uint8Array(Buffer.from(data, 'base64')) }
+  const object = parsed.data.object
+  if (meta === undefined || object === undefined) return null
+  const data = await bus.objectGet(tenantObjectName(tenant, object))
+  if (data === null) return null
+  return { meta, data }
 }
 
 /** Store a global variable (t.<tenant>.vars.<extId>.<name>). */

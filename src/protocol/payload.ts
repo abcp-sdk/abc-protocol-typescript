@@ -319,17 +319,22 @@ export type FileMetaWire = z.infer<typeof FileMetaSchema>
 
 /**
  * File-ingest request (extension -> agent), a 1:1 `req` on
- * `abc.<tenant>.file.ingest`. The extension never touches the blob/metadata
- * backend; the agent persists bytes and mints the canonical `file:<code>`,
- * using the same path as an in-process ingest. `data` is base64.
+ * `abc.<tenant>.file.ingest`.
+ *
+ * BYTES NEVER RIDE THE MESSAGE. The extension first stores the bytes in the
+ * transient object store under `tenantObjectName(tenant, object)` (the NATS
+ * object store chunks them, so any size works and the broker's max_payload is
+ * irrelevant), then sends only that object reference here. The agent reads the
+ * object, persists it to its blob + metadata backend, and mints the canonical
+ * `file:<code>`.
  */
 export const FileIngestRequestSchema = z.object({
   /** Optional caller-supplied code; empty => the agent mints one. */
   code: z.string().optional(),
   name: z.string(),
   mime: z.string(),
-  /** base64-encoded bytes. */
-  data: z.string(),
+  /** Transient object name (tenant-scoped) that holds the bytes. */
+  object: z.string(),
   session_name: z.string().optional(),
 })
 export type FileIngestRequest = z.infer<typeof FileIngestRequestSchema>
@@ -345,11 +350,16 @@ export type FileIngestResponse = z.infer<typeof FileIngestResponseSchema>
 export const FileGetRequestSchema = z.object({ code: z.string() })
 export type FileGetRequest = z.infer<typeof FileGetRequestSchema>
 
+/**
+ * File-get response. As with ingest, BYTES NEVER RIDE THE MESSAGE: the agent
+ * writes them to the transient object store and returns only the object
+ * reference; the caller reads it via `objectGet`.
+ */
 export const FileGetResponseSchema = z.object({
   ok: z.boolean(),
   meta: FileMetaSchema.optional(),
-  /** base64-encoded bytes. */
-  data: z.string().optional(),
+  /** Transient object name (tenant-scoped) holding the bytes. */
+  object: z.string().optional(),
   error: z.lazy(() => ErrorPayloadSchema).optional(),
 })
 export type FileGetResponse = z.infer<typeof FileGetResponseSchema>
