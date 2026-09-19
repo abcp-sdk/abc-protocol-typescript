@@ -65,6 +65,24 @@ export interface KvEvent {
   isUpdate: boolean
 }
 
+/**
+ * Transport-agnostic object storage (bytes). The NATS bus implements this
+ * natively (JetStream object stores `ABC_TOOL` transient / `ABC_FILES`
+ * durable); a deployment may inject an S3-compatible implementation so
+ * long-lived file bytes never sit in NATS. Exactly ONE backend is used per
+ * class — there is no read fallback.
+ */
+export interface ObjectStore {
+  /** Store a transient object (short-lived: tool payloads, catalog caches). */
+  objectPut(name: string, data: Uint8Array): Promise<void>
+  /** Fetch a transient object; null when absent. */
+  objectGet(name: string): Promise<Uint8Array | null>
+  /** Store a durable object (file bytes). */
+  objectPutPersistent(name: string, data: Uint8Array): Promise<void>
+  /** Fetch a durable object; null when absent. */
+  objectGetPersistent(name: string): Promise<Uint8Array | null>
+}
+
 export interface InboxSubscription {
   [Symbol.asyncIterator](): AsyncIterator<InboxMsg>
   close(): Promise<void>
@@ -78,7 +96,7 @@ export interface InboxSubscription {
  * The transport-agnostic message bus. There is exactly one transport
  * (NATS); every listed capability is always available (JetStream).
  */
-export interface Bus {
+export interface Bus extends ObjectStore {
   /** 1:1 request; the transport manages the reply address internally. */
   request(ch: string, payload: unknown, opts?: RequestOpts): Promise<Envelope>
 
@@ -114,22 +132,6 @@ export interface Bus {
 
   /** Durable inbox consume with explicit ack/nak/term. */
   inboxConsume(opts?: InboxConsumeOpts): Promise<InboxSubscription>
-
-  /** Store a (potentially large) object; transports chunk internally. */
-  objectPut(name: string, data: Uint8Array): Promise<void>
-
-  /** Fetch an object; null when absent. */
-  objectGet(name: string): Promise<Uint8Array | null>
-
-  /**
-   * Store an object in the persistent (no-TTL) bucket. Tool payloads use
-   * `objectPut` (transient, 24h); durable file bytes use this so they are
-   * never expired.
-   */
-  objectPutPersistent(name: string, data: Uint8Array): Promise<void>
-
-  /** Fetch an object from the persistent (no-TTL) bucket. */
-  objectGetPersistent(name: string): Promise<Uint8Array | null>
 
   /** Atomic create (fails if the key exists); returns the revision. */
   kvCreate(

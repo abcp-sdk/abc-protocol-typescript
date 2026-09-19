@@ -1,4 +1,5 @@
 import type { Bus } from '../bus/index.js'
+import type { ObjectStore } from '../bus/index.js'
 
 /**
  * Transport wiring. There is exactly one transport — NATS — with two
@@ -12,9 +13,9 @@ import type { Bus } from '../bus/index.js'
  * `Agent.connect(...)` / `Extension.connect(...)` resolve the right form
  * here and return the identical `Bus`.
  */
-export type AgentConnect = { url?: string }
+export type AgentConnect = { url?: string; durableObjects?: ObjectStore }
 
-export type ExtensionConnect = { url?: string }
+export type ExtensionConnect = { url?: string; durableObjects?: ObjectStore }
 
 export interface ConnectedBus {
   bus: Bus
@@ -24,5 +25,11 @@ export async function connectBus(
   opts: AgentConnect | ExtensionConnect,
 ): Promise<ConnectedBus> {
   const m = await import('./nats/index.js')
-  return { bus: await m.connectNatsBus(opts.url) }
+  return {
+    bus: await m.connectNatsBus(opts.url, {
+      ...(opts.durableObjects !== undefined
+        ? { durableObjects: opts.durableObjects }
+        : {}),
+    }),
+  }
 }

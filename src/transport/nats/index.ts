@@ -19,6 +19,7 @@ import type {
   InboxMsg,
   InboxPublishOpts,
   InboxSubscription,
+  ObjectStore,
   PublishOpts,
   RequestOpts,
   SubscribeOpts,
@@ -83,6 +84,12 @@ export interface NatsConnectOptions {
    * NATS headers (HMAC), incoming messages are verified. Undefined
    * (default) = zero auth overhead, everything passes. */
   identity?: Identity
+  /**
+   * External store for DURABLE objects (file bytes). When set, persistent
+   * object calls bypass JetStream; transient objects always stay on NATS.
+   * One backend per class, no read fallback.
+   */
+  durableObjects?: ObjectStore
 }
 
 function sameSubjects(a: string[] | undefined, b: string[]): boolean {
@@ -218,6 +225,14 @@ export class NatsBus implements Bus {
   constructor(
     private readonly nc: NatsConnection,
     private readonly idn?: Identity,
+    /**
+     * Optional external store for DURABLE objects only (`objectPutPersistent`
+     * / `objectGetPersistent` = file bytes). When set, durable bytes no longer
+     * live in NATS; transient objects (`objectPut`/`get`, tool payloads and
+     * catalog caches) stay on JetStream. The deployment chooses exactly one
+     * backend per class — there is no read fallback.
+     */
+    private readonly durableObjects?: ObjectStore,
   ) {}
 
   private signMsg(
@@ -483,11 +498,17 @@ export class NatsBus implements Bus {
   }
 
   async objectPutPersistent(name: string, data: Uint8Array): Promise<void> {
+    if (this.durableObjects !== undefined) {
+      return this.durableObjects.objectPutPersistent(name, data)
+    }
     const os = await new Objm(this.nc).create(OBJECT_BUCKET_PERSISTENT, {})
     await os.putBlob({ name }, data)
   }
 
   async objectGetPersistent(name: string): Promise<Uint8Array | null> {
+    if (this.durableObjects !== undefined) {
+      return this.durableObjects.objectGetPersistent(name)
+    }
     try {
       const os = await new Objm(this.nc).open(OBJECT_BUCKET_PERSISTENT)
       return await os.getBlob(name)
@@ -657,7 +678,7 @@ export async function connectNatsBus(
   const servers = url ?? process.env.NATS_URL ?? 'nats://127.0.0.1:4222'
   const nc = await connect({ servers })
   await ensureStreams(nc, opts)
-  return new NatsBus(nc, opts.identity)
+  return new NatsBus(nc, opts.identity, opts.durableObjects)
 }
 
 /**

@@ -15,13 +15,13 @@
   },
   "dependencies": {
     "@asteasolutions/zod-to-openapi": "^9.1.0",
-    "yaml": "^2.9.0",
-    "zod": "^4.4.3",
     "@nats-io/jetstream": "^3.4.0",
     "@nats-io/kv": "^3.4.0",
     "@nats-io/nats-core": "^3.4.0",
     "@nats-io/obj": "^3.4.0",
-    "@nats-io/transport-node": "^3.4.0"
+    "@nats-io/transport-node": "^3.4.0",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
