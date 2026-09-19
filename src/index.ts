@@ -1,6 +1,7 @@
 export * from './agent/index.js'
 export * from './agent/lease.js'
 export * from './bus/index.js'
+export * from './bus/objectstore-s3.js'
 export * from './extension/index.js'
 export * from './identity.js'
 export * from './manifest.js'

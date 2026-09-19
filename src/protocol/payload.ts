@@ -245,6 +245,9 @@ export type HookEvent = z.infer<typeof HookEventSchema>
  * up on `deleted`.
  */
 export const LifecycleEventSchema = z.object({
+  /** Unique event id (eid). Durable publishers always set it so consumers can
+   *  dedup across replay/redelivery. */
+  id: z.string().optional(),
   kind: z.enum(['created', 'forked', 'renamed', 'deleted']),
   session_name: z.string(),
   /** forked: the session this one forked from. */

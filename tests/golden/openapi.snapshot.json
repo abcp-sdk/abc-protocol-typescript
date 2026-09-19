@@ -715,6 +715,9 @@
       "LifecycleEvent": {
         "type": "object",
         "properties": {
+          "id": {
+            "type": "string"
+          },
           "kind": {
             "type": "string",
             "enum": [

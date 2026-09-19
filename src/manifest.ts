@@ -130,6 +130,9 @@ export function manifestConfig(
     variables?: Record<string, Omit<VariableSpec, 'description' | 'scope'>>
     onCallHook?: ExtensionConfig['onCallHook']
     onEventHook?: ExtensionConfig['onEventHook']
+    onConfigChange?: ExtensionConfig['onConfigChange']
+    onLifecycle?: ExtensionConfig['onLifecycle']
+    onInterrupt?: ExtensionConfig['onInterrupt']
   } = {},
 ): ExtensionConfig {
   const tools: Record<string, ToolSpec> = {}
@@ -191,5 +194,8 @@ export function manifestConfig(
   }
   if (opts.onCallHook !== undefined) cfg.onCallHook = opts.onCallHook
   if (opts.onEventHook !== undefined) cfg.onEventHook = opts.onEventHook
+  if (opts.onConfigChange !== undefined) cfg.onConfigChange = opts.onConfigChange
+  if (opts.onLifecycle !== undefined) cfg.onLifecycle = opts.onLifecycle
+  if (opts.onInterrupt !== undefined) cfg.onInterrupt = opts.onInterrupt
   return cfg
 }

@@ -19,6 +19,7 @@ import {
   MAILBOX_CONSUME,
   DLQ_CONSUME,
   MailboxMessageSchema,
+  newId,
   type ObjectRef,
   ToolResultSchema,
 } from '../protocol/index.js'
@@ -765,6 +766,7 @@ export class Agent {
     } = {},
   ): Promise<void> {
     const body: Record<string, unknown> = {
+      id: newId(),
       kind,
       tenant,
       session_name: sessionName,
@@ -824,6 +826,24 @@ export class Agent {
 
   async getObject(tenant: string, name: string): Promise<Uint8Array | null> {
     return this.bus.objectGet(tenantObjectName(tenant, name))
+  }
+
+  /** Store a DURABLE object (no TTL); the TS twin of Go's
+   *  `Agent.PutObjectPersistent`. */
+  async putObjectPersistent(
+    tenant: string,
+    name: string,
+    data: Uint8Array,
+  ): Promise<void> {
+    return this.bus.objectPutPersistent(tenantObjectName(tenant, name), data)
+  }
+
+  /** Fetch a DURABLE object; null when absent. */
+  async getObjectPersistent(
+    tenant: string,
+    name: string,
+  ): Promise<Uint8Array | null> {
+    return this.bus.objectGetPersistent(tenantObjectName(tenant, name))
   }
 
   /**

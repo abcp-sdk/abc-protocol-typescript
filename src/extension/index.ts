@@ -34,6 +34,13 @@ import {
   tenantObjectName,
 } from '../protocol/tenant.js'
 import { connectBus, type ExtensionConnect } from '../transport/index.js'
+import { toToolError } from './typed-error.js'
+
+export {
+  TypedToolError,
+  type ToolErrorCode,
+  toToolError,
+} from './typed-error.js'
 
 /**
  * Max size of a tool's `content` text returned to the agent. A tool result is
@@ -409,6 +416,124 @@ export class Extension {
   }
 
   /**
+   * The underlying transport bus. Exposed so callers can reach primitives the
+   * SDK does not wrap (the TS twin of Go's `Extension.Bus()`). Prefer the
+   * typed instance methods below where they exist.
+   */
+  get busHandle(): Bus {
+    return this.bus
+  }
+
+  // ---- session-facing helpers (instance methods) --------------------------
+  //
+  // TS mirror of the Go SDK's `Extension` methods. They bind `this.bus` and
+  // this extension's id so a handler never has to thread either explicitly.
+  // The equivalent standalone functions remain exported for back-compat.
+
+  /**
+   * Read a session variable the AGENT (or another extension, via `provider`)
+   * projects into the vars bucket — e.g. `locale` under provider `agent`.
+   * Returns `fallback` when absent. This is the idiomatic way for a TS
+   * extension to localize results (mirrors Go `GetSessionVariable`).
+   */
+  async getSessionVariable(
+    tenant: string,
+    provider: string,
+    sessionName: string,
+    name: string,
+    fallback = '',
+  ): Promise<string> {
+    if (sessionName === '') return fallback
+    try {
+      const v = await this.bus.kvGet(
+        VARS_BUCKET,
+        sessionVarKey(tenant, provider, sessionName, name),
+      )
+      return v === null || v === '' ? fallback : v
+    } catch {
+      return fallback
+    }
+  }
+
+  /** Store a global variable (`vars.<extId>.<name>`). */
+  async setVariable(
+    tenant: string,
+    name: string,
+    value: string,
+  ): Promise<void> {
+    await setVariable(this.bus, tenant, this.cfg.id, name, value)
+  }
+
+  /** Store a session variable (`vars.<extId>.<token>.<name>`). */
+  async setSessionVariable(
+    tenant: string,
+    sessionName: string,
+    name: string,
+    value: string,
+  ): Promise<void> {
+    await setSessionVariable(this.bus, tenant, this.cfg.id, sessionName, name, value)
+  }
+
+  /** Delete every session-scoped variable this extension declares. */
+  async deleteSessionVariables(
+    tenant: string,
+    sessionName: string,
+  ): Promise<void> {
+    await this.deleteSessionVariablesInternal(tenant, sessionName)
+  }
+
+  /** Push one SSE event onto the session's durable event stream. */
+  async publishSessionEvent(
+    tenant: string,
+    sessionName: string,
+    event: string,
+    params?: unknown,
+  ): Promise<void> {
+    await publishSessionEvent(this.bus, tenant, sessionName, event, params)
+  }
+
+  /** Publish an event into a session's durable mailbox. */
+  async publishMailboxEvent(
+    tenant: string,
+    sessionName: string,
+    eventType: string,
+    payload?: unknown,
+  ): Promise<void> {
+    await publishMailboxEvent(this.bus, tenant, sessionName, eventType, payload)
+  }
+
+  /** Store a transient object (tenant-scoped). */
+  async putObject(
+    tenant: string,
+    name: string,
+    data: Uint8Array,
+  ): Promise<void> {
+    await this.bus.objectPut(tenantObjectName(tenant, name), data)
+  }
+
+  /** Fetch a transient object; null when absent. */
+  getObject(tenant: string, name: string): Promise<Uint8Array | null> {
+    return this.bus.objectGet(tenantObjectName(tenant, name))
+  }
+
+  /** Store a DURABLE object (no TTL) — file bytes and other long-lived data. */
+  async putObjectPersistent(
+    tenant: string,
+    name: string,
+    data: Uint8Array,
+  ): Promise<void> {
+    await this.bus.objectPutPersistent(tenantObjectName(tenant, name), data)
+  }
+
+  /** Fetch a DURABLE object; null when absent. */
+  getObjectPersistent(
+    tenant: string,
+    name: string,
+  ): Promise<Uint8Array | null> {
+    return this.bus.objectGetPersistent(tenantObjectName(tenant, name))
+  }
+
+  /**
    * Report in-flight progress for a tool call. A one-way `pub` on
    * `abc.<tenant>.tool.progress.<callId>`, consumed by the agent's
    * orchestration layer (never the LLM context). Emitting it implicitly
@@ -508,10 +633,7 @@ export class Extension {
             await respond(result)
           } catch (e) {
             settled = true
-            await respond(undefined, {
-              code: 'internal',
-              message: String(e),
-            })
+            await respond(undefined, toToolError(e))
           } finally {
             this.untrackInflight(inflightKey, ac)
           }
@@ -632,7 +754,7 @@ export class Extension {
         const parsed = LifecycleEventSchema.safeParse(env.payload)
         if (!parsed.success) continue
         if (kind === 'deleted') {
-          await this.deleteSessionVariables(
+          await this.deleteSessionVariablesInternal(
             tenant,
             parsed.data.session_name,
           ).catch(() => {})
@@ -643,7 +765,7 @@ export class Extension {
   }
 
   /** Delete every session-scoped variable of a tenant's session (KV). */
-  private async deleteSessionVariables(
+  private async deleteSessionVariablesInternal(
     tenant: string,
     sessionName: string,
   ): Promise<void> {
