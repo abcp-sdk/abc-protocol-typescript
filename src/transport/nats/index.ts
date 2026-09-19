@@ -34,6 +34,7 @@ const STREAM_DLQ = 'ABC_DLQ'
 const MAILBOX_WILDCARD_ALL = 'abc.*.mailbox.>'
 const EVENTS_WILDCARD_ALL = 'abc.*.session.events.>'
 const LIFECYCLE_WILDCARD_ALL = 'abc.*.session.lifecycle.>'
+const SESSION_CHANGED_WILDCARD_ALL = 'abc.*.session.changed'
 const DLQ_WILDCARD_ALL = 'abc.*.dlq.>'
 const OBJECT_BUCKET = 'ABC_TOOL'
 const OBJECT_BUCKET_PERSISTENT = 'ABC_FILES'
@@ -43,12 +44,17 @@ const OBJECT_BUCKET_PERSISTENT = 'ABC_FILES'
  * `abc.<tenant>.<area>...`:
  *   - `abc.<t>.mailbox.<token>`        -> ABC_MAILBOX
  *   - `abc.<t>.session.events.<token>` -> ABC_EVENTS
+ *   - `abc.<t>.session.lifecycle.<kind>` -> ABC_EVENTS
+ *   - `abc.<t>.session.changed`        -> ABC_EVENTS
  *   - `abc.<t>.dlq.<token>`            -> ABC_DLQ
  * Wildcard consumers (`abc.*.mailbox.>` etc.) resolve the same way.
  */
 function streamFor(subject: string): string {
   const seg = subject.split('.')
-  if (seg[2] === 'session' && (seg[3] === 'events' || seg[3] === 'lifecycle'))
+  if (
+    seg[2] === 'session' &&
+    (seg[3] === 'events' || seg[3] === 'lifecycle' || seg[3] === 'changed')
+  )
     return STREAM_EVENTS
   if (seg[2] === 'dlq') return STREAM_DLQ
   return STREAM_MAILBOX
@@ -96,7 +102,7 @@ async function ensureStreams(
     { name: STREAM_MAILBOX, subjects: [MAILBOX_WILDCARD_ALL] },
     {
       name: STREAM_EVENTS,
-      subjects: [EVENTS_WILDCARD_ALL, LIFECYCLE_WILDCARD_ALL],
+      subjects: [EVENTS_WILDCARD_ALL, LIFECYCLE_WILDCARD_ALL, SESSION_CHANGED_WILDCARD_ALL],
     },
     { name: STREAM_DLQ, subjects: [DLQ_WILDCARD_ALL] },
   ]
