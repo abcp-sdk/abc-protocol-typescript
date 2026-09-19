@@ -40,10 +40,9 @@ import { connectBus, type ExtensionConnect } from '../transport/index.js'
  * fed into the model's context, so a huge text blob would blow the context (and
  * the bus message). Text above this is REJECTED as a tool error — the caller
  * must return large data as a FILE (`data.files` + object store), not as
- * `content`. 64 KiB ≈ 16k English tokens / ≈22k CJK tokens, safely under a
- * 32k-token target.
+ * `content`. 128 KiB ≈ 32k English tokens / ≈40k+ CJK tokens.
  */
-const MAX_TOOL_CONTENT_BYTES = 64 * 1024
+const MAX_TOOL_CONTENT_BYTES = 128 * 1024
 
 /** Data-plane subject wildcards an extension subscribes to (ignore tenant). */
 const WILDCARD = {

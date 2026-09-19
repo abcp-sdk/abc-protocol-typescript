@@ -75,7 +75,7 @@ const serveConfExt = async (bus: Bus): Promise<Extension> => {
         }),
       },
       big: {
-        description: 'returns >64KiB content (must be rejected as too large)',
+        description: 'returns >128KiB content (must be rejected as too large)',
         execute: async () => ({ content: 'x'.repeat(300 * 1024) }),
       },
       session: {
