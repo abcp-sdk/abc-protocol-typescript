@@ -880,13 +880,12 @@ export function putObject(
 export async function ingestFileViaAgent(
   bus: Bus,
   tenant: string,
-  req: { name: string; mime: string; data: Uint8Array; sessionName?: string },
-): Promise<string> {
+  req: { name: string; data: Uint8Array; sessionName?: string },
+): Promise<{ code: string; mime: string }> {
   const object = `${crypto.randomUUID()}.ingest`
   await bus.objectPut(tenantObjectName(tenant, object), req.data)
   const payload: Record<string, unknown> = {
     name: req.name,
-    mime: req.mime,
     object,
   }
   if (req.sessionName !== undefined) payload['session_name'] = req.sessionName
@@ -903,7 +902,7 @@ export async function ingestFileViaAgent(
   if (!parsed.data.ok) {
     throw new Error(parsed.data.error?.message ?? 'file ingest failed')
   }
-  return parsed.data.code
+  return { code: parsed.data.code, mime: parsed.data.mime }
 }
 
 /** Fetch stored bytes through the AGENT (a 1:1 `req` on

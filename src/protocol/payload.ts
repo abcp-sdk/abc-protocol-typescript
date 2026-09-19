@@ -338,12 +338,14 @@ export type FileMetaWire = z.infer<typeof FileMetaSchema>
  * irrelevant), then sends only that object reference here. The agent reads the
  * object, persists it to its blob + metadata backend, and mints the canonical
  * `file:<code>`.
+ *
+ * NO MIME: the agent DERIVES the content type from the bytes, so the caller
+ * cannot mislabel a file. The derived mime comes back in the response.
  */
 export const FileIngestRequestSchema = z.object({
   /** Optional caller-supplied code; empty => the agent mints one. */
   code: z.string().optional(),
   name: z.string(),
-  mime: z.string(),
   /** Transient object name (tenant-scoped) that holds the bytes. */
   object: z.string(),
   session_name: z.string().optional(),
@@ -353,6 +355,8 @@ export type FileIngestRequest = z.infer<typeof FileIngestRequestSchema>
 export const FileIngestResponseSchema = z.object({
   ok: z.boolean(),
   code: z.string().default(''),
+  /** The agent-derived content type of the stored file. */
+  mime: z.string().default(''),
   error: z.lazy(() => ErrorPayloadSchema).optional(),
 })
 export type FileIngestResponse = z.infer<typeof FileIngestResponseSchema>
