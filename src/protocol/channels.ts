@@ -55,7 +55,21 @@ export const CH = {
   configWildcard: (tenant: string) => `${tenantPrefix(tenant)}config.get.>`,
   dlq: (tenant: string, token: string) =>
     `${tenantPrefix(tenant)}dlq.${token}`,
+  /**
+   * File ingest / fetch RPC (agent-served). A DB-less, store-less extension
+   * (no S3 credentials, no agent DB) asks the AGENT to persist bytes and mint
+   * a canonical `file:<code>`; the agent owns the blob + metadata backends, so
+   * the exact same storage path is used as an in-process ingest. The tenant
+   * rides the subject (and the envelope), so no separate credential is needed.
+   */
+  fileIngest: (tenant: string) => `${tenantPrefix(tenant)}file.ingest`,
+  fileGet: (tenant: string) => `${tenantPrefix(tenant)}file.get`,
 } as const
+
+/** Cross-tenant consume wildcard for the file-ingest RPC. */
+export const FILE_INGEST_WILDCARD = 'abc.*.file.ingest'
+/** Cross-tenant consume wildcard for the file-get RPC. */
+export const FILE_GET_WILDCARD = 'abc.*.file.get'
 
 /** Prefix for all mailbox channels; append `>` for the consume wildcard. */
 export const MAILBOX_WILDCARD = 'abc.'

@@ -8,6 +8,9 @@ import {
   type ExtensionManifest,
   type ExtensionTool,
   type ExtensionVariable,
+  FileGetResponseSchema,
+  FileIngestResponseSchema,
+  type FileMetaWire,
   HookCallSchema,
   HookEventSchema,
   InterruptSignalSchema,
@@ -852,6 +855,57 @@ export function putObject(
   data: Uint8Array,
 ): Promise<void> {
   return bus.objectPut(tenantObjectName(tenant, name), data)
+}
+
+/**
+ * Ingest bytes through the AGENT (a 1:1 `req` on `abc.<tenant>.file.ingest`)
+ * and receive the canonical `file:<code>`. For extensions that have no blob
+ * backend or metadata store of their own (they own neither S3 credentials nor
+ * the agent DB): the agent persists the bytes to the configured object store
+ * and the metadata to the configured meta backend, using the SAME path as an
+ * in-process ingest. Tenant is derived from the request subject/envelope.
+ */
+export async function ingestFileViaAgent(
+  bus: Bus,
+  tenant: string,
+  req: { name: string; mime: string; data: Uint8Array; sessionName?: string },
+): Promise<string> {
+  const payload: Record<string, unknown> = {
+    name: req.name,
+    mime: req.mime,
+    data: Buffer.from(req.data).toString('base64'),
+  }
+  if (req.sessionName !== undefined) payload['session_name'] = req.sessionName
+  const reply = await bus.request(CH.fileIngest(tenant), payload, {
+    tenant,
+    ...(req.sessionName !== undefined
+      ? { sessionName: req.sessionName }
+      : {}),
+  })
+  const parsed = FileIngestResponseSchema.safeParse(reply.payload)
+  if (!parsed.success) {
+    throw new Error('file ingest: malformed response')
+  }
+  if (!parsed.data.ok) {
+    throw new Error(parsed.data.error?.message ?? 'file ingest failed')
+  }
+  return parsed.data.code
+}
+
+/** Fetch stored bytes through the AGENT (a 1:1 `req` on
+ *  `abc.<tenant>.file.get`). Returns null when the file is absent. */
+export async function getFileViaAgent(
+  bus: Bus,
+  tenant: string,
+  code: string,
+): Promise<{ meta: FileMetaWire; data: Uint8Array } | null> {
+  const reply = await bus.request(CH.fileGet(tenant), { code }, { tenant })
+  const parsed = FileGetResponseSchema.safeParse(reply.payload)
+  if (!parsed.success || !parsed.data.ok) return null
+  const meta = parsed.data.meta
+  const data = parsed.data.data
+  if (meta === undefined || data === undefined) return null
+  return { meta, data: new Uint8Array(Buffer.from(data, 'base64')) }
 }
 
 /** Store a global variable (t.<tenant>.vars.<extId>.<name>). */

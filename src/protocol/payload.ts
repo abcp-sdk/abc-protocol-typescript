@@ -301,3 +301,55 @@ export const HookResponseSchema = z.object({
     .optional(),
 })
 export type HookResponse = z.infer<typeof HookResponseSchema>
+
+/**
+ * File metadata as carried on the file RPCs. Mirrors the agent's `FileRecord`
+ * metadata and the ts/go `FileMeta` shape (`uploader_session` wire field).
+ */
+export const FileMetaSchema = z.object({
+  code: z.string(),
+  sha256: z.string(),
+  name: z.string(),
+  mime: z.string(),
+  size: z.number().int(),
+  uploader_session: z.string().optional(),
+  created_at: z.string(),
+})
+export type FileMetaWire = z.infer<typeof FileMetaSchema>
+
+/**
+ * File-ingest request (extension -> agent), a 1:1 `req` on
+ * `abc.<tenant>.file.ingest`. The extension never touches the blob/metadata
+ * backend; the agent persists bytes and mints the canonical `file:<code>`,
+ * using the same path as an in-process ingest. `data` is base64.
+ */
+export const FileIngestRequestSchema = z.object({
+  /** Optional caller-supplied code; empty => the agent mints one. */
+  code: z.string().optional(),
+  name: z.string(),
+  mime: z.string(),
+  /** base64-encoded bytes. */
+  data: z.string(),
+  session_name: z.string().optional(),
+})
+export type FileIngestRequest = z.infer<typeof FileIngestRequestSchema>
+
+export const FileIngestResponseSchema = z.object({
+  ok: z.boolean(),
+  code: z.string().default(''),
+  error: z.lazy(() => ErrorPayloadSchema).optional(),
+})
+export type FileIngestResponse = z.infer<typeof FileIngestResponseSchema>
+
+/** File-get request (extension -> agent) on `abc.<tenant>.file.get`. */
+export const FileGetRequestSchema = z.object({ code: z.string() })
+export type FileGetRequest = z.infer<typeof FileGetRequestSchema>
+
+export const FileGetResponseSchema = z.object({
+  ok: z.boolean(),
+  meta: FileMetaSchema.optional(),
+  /** base64-encoded bytes. */
+  data: z.string().optional(),
+  error: z.lazy(() => ErrorPayloadSchema).optional(),
+})
+export type FileGetResponse = z.infer<typeof FileGetResponseSchema>
