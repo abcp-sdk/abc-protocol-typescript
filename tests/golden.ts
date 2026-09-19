@@ -24,4 +24,21 @@ export const GOLDEN = {
   dlqToken: 'abc.alice.dlq.q-Yz86R6J1gXTqvpFg2vNs',
   sessionVarKey: 't.alice.ops.q-Yz86R6J1gXTqvpFg2vNs.ws',
   varKey: 't.alice.ops.base-url',
+  // i18n resolution (mirrors abc-protocol-go/conformance/golden_test.go).
+  i18n: {
+    catalog: {
+      hello: { en: 'Hello {name}', zh: '你好 {name}', ja: 'こんにちは {name}' },
+      plain: { en: 'plain', zh: '简单' },
+    },
+    zh: '你好 X',
+    zhCN: '你好 X',
+    zhHans: '你好 X',
+    jaJP: 'こんにちは X',
+    de: 'Hello X',
+    empty: 'Hello X',
+    plainZh: '简单',
+    plainUnknown: 'plain',
+    baseLangZhHans: 'zh',
+    interp: 'Hi 1 {b}',
+  },
 } as const
