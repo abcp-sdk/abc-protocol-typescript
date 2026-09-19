@@ -35,7 +35,15 @@ import {
 } from '../protocol/tenant.js'
 import { connectBus, type ExtensionConnect } from '../transport/index.js'
 
-const OFFLOAD_THRESHOLD = 256 * 1024
+/**
+ * Max size of a tool's `content` text returned to the agent. A tool result is
+ * fed into the model's context, so a huge text blob would blow the context (and
+ * the bus message). Text above this is REJECTED as a tool error — the caller
+ * must return large data as a FILE (`data.files` + object store), not as
+ * `content`. 64 KiB ≈ 16k English tokens / ≈22k CJK tokens, safely under a
+ * 32k-token target.
+ */
+const MAX_TOOL_CONTENT_BYTES = 64 * 1024
 
 /** Data-plane subject wildcards an extension subscribes to (ignore tenant). */
 const WILDCARD = {
@@ -459,14 +467,15 @@ export class Extension {
             if (error !== undefined) res.error = error
             else if (result !== undefined) {
               if (result.content !== undefined) {
-                if (result.content.length > OFFLOAD_THRESHOLD) {
-                  const objName = `${p.call_id}.data`
-                  await this.bus.objectPut(
-                    tenantObjectName(tenant, objName),
-                    Buffer.from(result.content),
-                  )
-                  res.object = { id: objName, content_type: 'text/plain' }
-                  res.content = result.content.slice(0, 400)
+                // Text feeds the model's context; a huge blob would blow it.
+                // Return large data as a FILE (data.files + object store).
+                if (Buffer.byteLength(result.content, 'utf8') > MAX_TOOL_CONTENT_BYTES) {
+                  res.error = {
+                    code: 'invalid_argument',
+                    message:
+                      `tool '${name}' returned ${Buffer.byteLength(result.content, 'utf8')} bytes of text, ` +
+                      `over the ${MAX_TOOL_CONTENT_BYTES}-byte limit; return large data as a file (data.files) instead`,
+                  }
                 } else {
                   res.content = result.content
                 }

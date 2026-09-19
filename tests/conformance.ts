@@ -75,7 +75,7 @@ const serveConfExt = async (bus: Bus): Promise<Extension> => {
         }),
       },
       big: {
-        description: 'returns >256KB content (object offload)',
+        description: 'returns >64KiB content (must be rejected as too large)',
         execute: async () => ({ content: 'x'.repeat(300 * 1024) }),
       },
       session: {
@@ -161,14 +161,13 @@ export function runConformance(name: string, newPair: Factory): void {
       await cleanup()
     })
 
-    it('tool offloads large content to the object store', async () => {
+    it('rejects tool content above the size limit', async () => {
       const { agentBus, extensionBus, cleanup } = await newPair()
       const ext = await serveConfExt(extensionBus)
       const a = new Agent(agentBus)
       const tr = await a.callTool(T, 'sess-1', 'conf-ext', 'big', 'c3', {})
-      expect(tr.object?.id).toBeTruthy()
-      const bytes = await a.getObject(T, tr.object?.id ?? '')
-      expect(bytes?.length).toBe(300 * 1024)
+      expect(tr.error?.code).toBe('invalid_argument')
+      expect(tr.content ?? '').toBe('')
       await ext.close()
       await cleanup()
     })
