@@ -85,7 +85,7 @@ describe('manifestConfig bindings', () => {
     const onLifecycle = () => {}
     const onInterrupt = () => {}
     const cfg = manifestConfig(
-      { id: 'x', version: '1.0.0' },
+      { id: 'x', version: '1.0.0', tools: [], variables: [] },
       { onConfigChange, onLifecycle, onInterrupt },
     )
     expect(cfg.onConfigChange).toBe(onConfigChange)
