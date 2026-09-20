@@ -675,10 +675,41 @@ export async function connectNatsBus(
   url?: string,
   opts: NatsConnectOptions = {},
 ): Promise<NatsBus> {
-  const servers = url ?? process.env.NATS_URL ?? 'nats://127.0.0.1:4222'
-  const nc = await connect({ servers })
+  const raw = url ?? process.env.NATS_URL ?? 'nats://127.0.0.1:4222'
+  // nats.js does NOT read userinfo from the server URL (it only honours
+  // opts.user/opts.pass/opts.token), so a `nats://user:pass@host:4222` URL
+  // would connect anonymously and fail against an auth-required server. Pull
+  // the credentials out of the URL and pass them explicitly.
+  const { servers, user, pass } = splitServerAuth(raw)
+  const nc = await connect({
+    servers,
+    ...(user !== undefined ? { user } : {}),
+    ...(pass !== undefined ? { pass } : {}),
+  })
   await ensureStreams(nc, opts)
   return new NatsBus(nc, opts.identity, opts.durableObjects)
+}
+
+/**
+ * Split `nats://user:pass@host:port` into an auth-free server URL plus the
+ * credentials. Returns the URL untouched when it carries no userinfo.
+ */
+function splitServerAuth(url: string): {
+  servers: string
+  user?: string
+  pass?: string
+} {
+  try {
+    const u = new URL(url)
+    if (u.username === '' && u.password === '') return { servers: url }
+    const user = decodeURIComponent(u.username)
+    const pass = decodeURIComponent(u.password)
+    u.username = ''
+    u.password = ''
+    return { servers: u.toString(), user, ...(pass !== '' ? { pass } : {}) }
+  } catch {
+    return { servers: url }
+  }
 }
 
 /**
