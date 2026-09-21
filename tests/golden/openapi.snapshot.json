@@ -201,6 +201,9 @@
           },
           "payload": {
             "description": "Opaque message body."
+          },
+          "source": {
+            "type": "string"
           }
         },
         "required": [

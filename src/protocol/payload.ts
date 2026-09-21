@@ -118,11 +118,24 @@ export type ToolResult = z.infer<typeof ToolResultSchema>
 
 export const MailboxMessageSchema = z.object({
   id: z.string(),
+  /**
+   * Message type: `trigger` (drives a turn), `interrupt`, or `event`
+   * (context only). Free-form on the wire; unknown types are treated as
+   * `event` by the agent.
+   */
   type: z.string(),
   payload: z
     .unknown()
     .openapi({ description: 'Opaque message body.' })
     .optional(),
+  /**
+   * ORIGIN of the message. Open string:
+   *   `user`                — a human prompt (HTTP Prompt route)
+   *   `session:{session}`   — another session (subsession-create / mail-send)
+   *   `system:{name}`       — a system / automation source
+   *   other                 — extension-defined; consumers degrade gracefully
+   */
+  source: z.string().optional(),
 })
 export type MailboxMessage = z.infer<typeof MailboxMessageSchema>
 

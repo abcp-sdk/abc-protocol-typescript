@@ -46,6 +46,8 @@ export interface MailboxMessageResolved {
   sessionName: string
   type: string
   payload?: unknown
+  /** Origin of the message (see MailboxMessageSchema.source). */
+  source: string
 }
 
 export interface ConfigError {
@@ -586,16 +588,25 @@ export class Agent {
     }
   }
 
+  /**
+   * Publish a durable mailbox message to a session.
+   *
+   * `type` is `trigger` (drives a turn), `interrupt`, or `event` (context
+   * only). `source` records the ORIGIN (`user`, `session:{name}`,
+   * `system:{name}`, or an extension-defined value) so consumers can tell a
+   * person's prompt from another session's hand-off.
+   */
   async publishMailbox(
     tenant: string,
     sessionName: string,
     type: string,
     payload: unknown,
+    source = '',
   ): Promise<void> {
     const id = crypto.randomUUID()
     await this.bus.inboxPublish(
       CH.mailbox(tenant, sessionName),
-      { id, type, payload },
+      { id, type, payload, source },
       { id, sessionName, tenant },
     )
   }
@@ -629,6 +640,7 @@ export class Agent {
             sessionName,
             type: p.type ?? 'event',
             payload: p.payload,
+            source: p.source ?? '',
           })
           naks.delete(id)
           await msg.ack()
@@ -677,6 +689,7 @@ export class Agent {
           sessionName,
           parsed.data.type ?? 'event',
           parsed.data.payload,
+          parsed.data.source ?? 'dlq_requeue',
         )
         await msg.ack()
         return true
@@ -806,6 +819,7 @@ export class Agent {
             sessionName,
             type: parsed.data.type ?? 'event',
             payload: parsed.data.payload,
+            source: parsed.data.source ?? '',
           })
           await msg.ack()
         } catch {

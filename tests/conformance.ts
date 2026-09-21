@@ -366,15 +366,20 @@ export function runConformance(name: string, newPair: Factory): void {
         received.push(msg)
       })
       await sleep(50)
-      await new Agent(agentBus).publishMailbox(T, 'sess-mb', 'user_prompt', {
-        text: 'hello',
-      })
+      await new Agent(agentBus).publishMailbox(
+        T,
+        'sess-mb',
+        'trigger',
+        { text: 'hello' },
+        'user',
+      )
       await sleep(150)
       expect(received).toHaveLength(1)
       expect(received[0]).toMatchObject({
         sessionName: 'sess-mb',
-        type: 'user_prompt',
+        type: 'trigger',
         payload: { text: 'hello' },
+        source: 'user',
       })
       await cancel()
       await cleanup()
@@ -1054,7 +1059,7 @@ export function runConformance(name: string, newPair: Factory): void {
           received.push(msg)
         })
         await sleep(50)
-        await a.publishMailbox(T, 'sess-mb-iso', 'user_prompt', { text: 'a' })
+        await a.publishMailbox(T, 'sess-mb-iso', 'trigger', { text: 'a' }, 'user')
         await sleep(200)
         expect(received).toHaveLength(1)
         expect(received[0]?.tenant).toBe(T)

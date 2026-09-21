@@ -492,14 +492,23 @@ export class Extension {
     await publishSessionEvent(this.bus, tenant, sessionName, event, params)
   }
 
-  /** Publish an event into a session's durable mailbox. */
+  /** Publish an event into a session's durable mailbox. `source` records the
+   *  origin (e.g. `system:{name}` or an extension-defined value). */
   async publishMailboxEvent(
     tenant: string,
     sessionName: string,
     eventType: string,
     payload?: unknown,
+    source = '',
   ): Promise<void> {
-    await publishMailboxEvent(this.bus, tenant, sessionName, eventType, payload)
+    await publishMailboxEvent(
+      this.bus,
+      tenant,
+      sessionName,
+      eventType,
+      payload,
+      source,
+    )
   }
 
   /** Store a transient object (tenant-scoped). */
@@ -961,18 +970,25 @@ export async function publishSessionEvent(
   )
 }
 
-/** Publish an event into a tenant session's durable mailbox. */
+/**
+ * Publish a message into a tenant session's durable mailbox.
+ *
+ * `eventType` is `trigger` (drives a turn), `event` (context only), or
+ * `interrupt`. `source` records the ORIGIN (`user`, `session:{name}`,
+ * `system:{name}`, or an extension-defined value).
+ */
 export async function publishMailboxEvent(
   bus: Bus,
   tenant: string,
   sessionName: string,
   eventType = 'event',
   payload?: unknown,
+  source = '',
 ): Promise<void> {
   const id = crypto.randomUUID()
   await bus.inboxPublish(
     CH.mailbox(tenant, sessionName),
-    { id, type: eventType, payload },
+    { id, type: eventType, payload, source },
     { id, sessionName, tenant },
   )
 }

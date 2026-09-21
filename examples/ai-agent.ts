@@ -8,7 +8,7 @@
  *        └──── tool results fed back as ToolResultContent ────────┘
  *
  * Events reach the agent loop through three independent doors (see README):
- *   - mailbox     (durable, per-session; user_prompt / interrupt / event)
+ *   - mailbox     (durable, per-session; trigger / interrupt / event)
  *   - event hooks (async broadcast, best-effort)
  *   - progress    (per-call, UI-only, never enters the LLM context)
  *
@@ -110,7 +110,7 @@ function toToolResultContent(r: ToolResult): string {
 
 async function startMailboxLoop(agent: Agent, onMessage: (m: { type: string; payload: unknown }) => void): Promise<() => Promise<void>> {
   return agent.consumeMailbox(async msg => {
-    // user_prompt messages start a turn; interrupt/act on your loop.
+    // trigger messages start a turn; interrupt/act on your loop.
     onMessage({ type: msg.type, payload: msg.payload })
   })
 }
