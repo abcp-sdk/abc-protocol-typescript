@@ -90,6 +90,20 @@ export interface NatsConnectOptions {
    * One backend per class, no read fallback.
    */
   durableObjects?: ObjectStore
+  /**
+   * nats.js `maxReconnectAttempts`. Defaults to `-1` (unlimited): a long-lived
+   * server must ride out a broker restart / slow-consumer disconnect instead of
+   * giving up after the nats.js default of 10 attempts and becoming a zombie
+   * that still answers HTTP but can never publish again.
+   */
+  maxReconnectAttempts?: number
+  /**
+   * How long to keep retrying the FIRST connect before failing (ms). Defaults
+   * to unlimited so the agent can boot before its broker is ready.
+   */
+  reconnectTimeWaitMs?: number
+  /** Wait indefinitely for the first connection instead of failing fast. */
+  waitOnFirstConnect?: boolean
 }
 
 function sameSubjects(a: string[] | undefined, b: string[]): boolean {
@@ -698,6 +712,14 @@ export class NatsBus implements Bus {
     // best-effort.
     await this.nc.drain().catch(() => {})
   }
+
+  async closed(): Promise<void> {
+    // `nc.closed()` resolves when the connection is permanently gone (reconnect
+    // budget exhausted, auth violation, or an explicit close/drain). It may
+    // resolve with an error; callers only care that the bus is dead, so never
+    // reject.
+    await this.nc.closed().catch(() => {})
+  }
 }
 
 async function* decodeIter(
@@ -766,6 +788,16 @@ export async function connectNatsBus(
     servers,
     ...(user !== undefined ? { user } : {}),
     ...(pass !== undefined ? { pass } : {}),
+    // Unlimited reconnect by default: a long-lived agent must survive a broker
+    // restart or a slow-consumer disconnect. Giving up after nats.js's default
+    // 10 attempts left the process alive but unable to publish (a zombie).
+    maxReconnectAttempts: opts.maxReconnectAttempts ?? -1,
+    ...(opts.reconnectTimeWaitMs !== undefined
+      ? { reconnectTimeWait: opts.reconnectTimeWaitMs }
+      : {}),
+    ...(opts.waitOnFirstConnect !== undefined
+      ? { waitOnFirstConnect: opts.waitOnFirstConnect }
+      : {}),
   })
   await ensureStreams(nc, opts)
   return new NatsBus(nc, opts.identity, opts.durableObjects)

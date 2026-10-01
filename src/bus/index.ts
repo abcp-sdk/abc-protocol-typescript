@@ -174,5 +174,14 @@ export interface Bus extends ObjectStore {
   /** Delete a key. */
   kvDelete(bucket: string, key: string): Promise<void>
 
+  /**
+   * Resolves when the underlying transport is PERMANENTLY closed and will
+   * never reconnect (reconnect budget exhausted, auth violation, or an
+   * explicit drain/close). Callers use this to fail fast — a long-lived
+   * server should exit so its supervisor can restart it rather than keep
+   * serving from a dead bus. Never rejects.
+   */
+  closed(): Promise<void>
+
   close(): Promise<void>
 }
