@@ -105,13 +105,37 @@ async function ensureStreams(
 ): Promise<void> {
   const jsm = await jetstreamManager(nc)
   const maxAge = opts.maxAgeMs ?? 24 * 3600 * 1_000_000_000
+  // HARD UPPER BOUNDS (defense in depth). These streams are 24h ephemeral
+  // carriers; without caps a bug or a hot session can grow a stream without
+  // limit and a consumer leak can exhaust the server. `max_consumers` is a
+  // circuit breaker: if consumers ever balloon again, creation fails fast
+  // (surfacing the bug) instead of silently saturating the broker.
   const specs = [
-    { name: STREAM_MAILBOX, subjects: [MAILBOX_WILDCARD_ALL] },
+    {
+      name: STREAM_MAILBOX,
+      subjects: [MAILBOX_WILDCARD_ALL],
+      max_bytes: 256 * 1024 * 1024,
+      max_msgs_per_subject: 100_000,
+      max_consumers: 2000,
+    },
     {
       name: STREAM_EVENTS,
-      subjects: [EVENTS_WILDCARD_ALL, LIFECYCLE_WILDCARD_ALL, SESSION_CHANGED_WILDCARD_ALL],
+      subjects: [
+        EVENTS_WILDCARD_ALL,
+        LIFECYCLE_WILDCARD_ALL,
+        SESSION_CHANGED_WILDCARD_ALL,
+      ],
+      max_bytes: 512 * 1024 * 1024,
+      max_msgs_per_subject: 100_000,
+      max_consumers: 2000,
     },
-    { name: STREAM_DLQ, subjects: [DLQ_WILDCARD_ALL] },
+    {
+      name: STREAM_DLQ,
+      subjects: [DLQ_WILDCARD_ALL],
+      max_bytes: 64 * 1024 * 1024,
+      max_msgs_per_subject: 10_000,
+      max_consumers: 1000,
+    },
   ]
 
   // v1 -> v2 migration. The v1 layout used subject-per-area WITHOUT a tenant
@@ -141,6 +165,11 @@ async function ensureStreams(
   }
 
   for (const s of specs) {
+    const limits = {
+      max_bytes: s.max_bytes,
+      max_msgs_per_subject: s.max_msgs_per_subject,
+      max_consumers: s.max_consumers,
+    }
     let info: Awaited<ReturnType<typeof jsm.streams.info>> | undefined
     try {
       info = await jsm.streams.info(s.name)
@@ -149,13 +178,26 @@ async function ensureStreams(
         name: s.name,
         subjects: s.subjects,
         max_age: maxAge,
+        ...limits,
         ...(opts.replicas ? { num_replicas: opts.replicas } : {}),
       })
       continue
     }
-    // drift repair: subjects must match the desired set
-    if (!sameSubjects(info.config.subjects, s.subjects)) {
-      await jsm.streams.update(s.name, { subjects: s.subjects })
+    // Drift repair: subjects AND the hard limits must match the desired set.
+    // `streams.update` merges into the existing config, so a `max_consumers`
+    // it reports as 0 (unlimited) is corrected here on the next connect.
+    if (
+      !sameSubjects(info.config.subjects, s.subjects) ||
+      info.config.max_bytes !== s.max_bytes ||
+      info.config.max_msgs_per_subject !== s.max_msgs_per_subject ||
+      info.config.max_consumers !== s.max_consumers
+    ) {
+      await jsm.streams
+        .update(s.name, {
+          subjects: s.subjects,
+          ...limits,
+        })
+        .catch(() => {})
     }
   }
   void jsm
@@ -409,10 +451,15 @@ export class NatsBus implements Bus {
             deliver_policy: 'new' as const,
           }
     // An ordered consumer is created by passing options (not a durable name).
+    // NOTE: do NOT set `inactive_threshold` here. nats.js's ordered() takes it
+    // in MILLIS and multiplies by 1e6 (`nanos()`), while this SDK previously
+    // passed a NANOS-scale value (60_000_000_000) — the server then stored
+    // ~6.9e16 ns (~694 days), so every consumer lived forever. Leaving it unset
+    // uses nats.js's own 5-minute default, and `close()` below deletes the
+    // consumer explicitly, so nothing accumulates.
     const consumer = await js.consumers.get(streamFor(ch), {
       filter_subjects: [ch],
       ...start,
-      inactive_threshold: 60_000_000_000,
     } as never)
     const messages = await consumer.consume({ max_messages: 10_000 })
     const bus = this
@@ -421,7 +468,22 @@ export class NatsBus implements Bus {
         return decodeConsumerIter(messages, bus)
       },
       async close() {
-        await messages.close()
+        // Delete the server-side consumer IMMEDIATELY and unconditionally. This
+        // is the important part: `messages.close()` only tears down the local
+        // iterator, so without this the ordered consumer leaks on the stream
+        // (the events stream accumulated thousands of ephemeral consumers and
+        // saturated the server). Deleting first also means a stalled local
+        // iterator can never keep the consumer alive.
+        await consumer.delete().catch(() => {})
+        // Then release the local iterator, bounded so a never-started iterator
+        // (whose `close()` waits for the queue to drain) cannot hang the caller.
+        await Promise.race([
+          messages.close(),
+          new Promise<void>(resolve => {
+            const t = setTimeout(resolve, 2000)
+            if (typeof t.unref === 'function') t.unref()
+          }),
+        ]).catch(() => {})
       },
     }
   }
