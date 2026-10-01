@@ -438,7 +438,7 @@ export class NatsBus implements Bus {
    */
   async subscribeStream(
     ch: string,
-    opts?: { startTimeMs?: number },
+    opts?: { startTimeMs?: number; signal?: AbortSignal },
   ): Promise<Subscription> {
     const js = jetstream(this.nc)
     const start =
@@ -463,27 +463,46 @@ export class NatsBus implements Bus {
     } as never)
     const messages = await consumer.consume({ max_messages: 10_000 })
     const bus = this
+    let closed = false
+    const teardown = async (): Promise<void> => {
+      if (closed) return
+      closed = true
+      // Delete the server-side consumer IMMEDIATELY and unconditionally. This
+      // is the important part: `messages.close()` only tears down the local
+      // iterator, so without this the ordered consumer leaks on the stream
+      // (the events stream accumulated thousands of ephemeral consumers and
+      // saturated the server). Deleting first also means a stalled local
+      // iterator can never keep the consumer alive.
+      await consumer.delete().catch(() => {})
+      // Release the local iterator, bounded so a never-started iterator (whose
+      // `close()` waits for the queue to drain) cannot hang the caller.
+      await Promise.race([
+        messages.close(),
+        new Promise<void>(resolve => {
+          const t = setTimeout(resolve, 2000)
+          if (typeof t.unref === 'function') t.unref()
+        }),
+      ]).catch(() => {})
+    }
+    // Abort-driven teardown: when the caller passes a signal (e.g. an RPC's
+    // disconnect signal), reclaim the consumer as soon as it fires.
+    const signal = opts?.signal
+    const onAbort = () => {
+      void teardown()
+    }
+    if (signal !== undefined) {
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+    }
     return {
       [Symbol.asyncIterator]() {
         return decodeConsumerIter(messages, bus)
       },
       async close() {
-        // Delete the server-side consumer IMMEDIATELY and unconditionally. This
-        // is the important part: `messages.close()` only tears down the local
-        // iterator, so without this the ordered consumer leaks on the stream
-        // (the events stream accumulated thousands of ephemeral consumers and
-        // saturated the server). Deleting first also means a stalled local
-        // iterator can never keep the consumer alive.
-        await consumer.delete().catch(() => {})
-        // Then release the local iterator, bounded so a never-started iterator
-        // (whose `close()` waits for the queue to drain) cannot hang the caller.
-        await Promise.race([
-          messages.close(),
-          new Promise<void>(resolve => {
-            const t = setTimeout(resolve, 2000)
-            if (typeof t.unref === 'function') t.unref()
-          }),
-        ]).catch(() => {})
+        if (signal !== undefined) {
+          signal.removeEventListener('abort', onAbort)
+        }
+        await teardown()
       },
     }
   }

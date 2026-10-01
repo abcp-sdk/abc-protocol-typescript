@@ -877,8 +877,11 @@ export class Agent {
   async *streamEvents(
     tenant: string,
     sessionName: string,
-    opts?: { startTimeMs?: number },
+    opts?: { startTimeMs?: number; signal?: AbortSignal },
   ): AsyncGenerator<{ event: string; params?: unknown; eid?: string }> {
+    // Forward `startTimeMs`/`signal` so the underlying ordered consumer is
+    // reclaimed the moment the caller aborts (e.g. a streaming RPC whose client
+    // disconnected, or a server-side shutdown).
     const sub = await this.bus.subscribeStream(
       CH.sessionEvents(tenant, sessionName),
       opts,

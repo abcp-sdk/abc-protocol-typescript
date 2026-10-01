@@ -120,7 +120,7 @@ export interface Bus extends ObjectStore {
    */
   subscribeStream(
     ch: string,
-    opts?: { startTimeMs?: number },
+    opts?: { startTimeMs?: number; signal?: AbortSignal },
   ): Promise<Subscription>
 
   /** Durable inbox publish (at-least-once). */

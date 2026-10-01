@@ -53,6 +53,38 @@ async function consumerCount(): Promise<number> {
 }
 
 describe('subscribeStream consumer lifecycle', () => {
+  it('deletes the server-side consumer when the abort signal fires', async () => {
+    if (url === null) return
+    const bus = await connectNatsBus(url)
+    try {
+      const ac = new AbortController()
+      const sub = await bus.subscribeStream('abc.T1.session.events.S2', {
+        signal: ac.signal,
+      })
+      const pump = (async () => {
+        try {
+          for await (const _ of sub) {
+            // no-op
+          }
+        } catch {
+          // closed
+        }
+      })()
+      await new Promise(r => setTimeout(r, 100))
+      expect(await consumerCount()).toBe(1)
+
+      ac.abort()
+      await pump.catch(() => {})
+      // Reclaim may be async (fire-and-forget on abort); poll briefly.
+      for (let i = 0; i < 20 && (await consumerCount()) !== 0; i++) {
+        await new Promise(r => setTimeout(r, 50))
+      }
+      expect(await consumerCount()).toBe(0)
+    } finally {
+      await bus.close().catch(() => {})
+    }
+  })
+
   it('deletes the server-side consumer on close', async () => {
     if (url === null) {
       // No broker available (CI/local without nats-server): skip silently.
